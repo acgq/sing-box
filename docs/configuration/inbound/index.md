@@ -29,6 +29,7 @@
 | `shadowtls`   | [ShadowTLS](./shadowtls/)     | TCP              |
 | `tuic`        | [TUIC](./tuic/)               | :material-close: |
 | `hysteria2`   | [Hysteria2](./hysteria2/)     | :material-close: |
+| `queqiao`     | [Queqiao](./queqiao/)         | :material-close: |
 | `vless`       | [VLESS](./vless/)             | TCP              |
 | `anytls`      | [AnyTLS](./anytls/)           | TCP              |
 | `snell`       | [Snell](./snell/)             | TCP              |
