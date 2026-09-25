@@ -31,6 +31,7 @@
 | `shadowtls`    | [ShadowTLS](./shadowtls/)       |
 | `tuic`         | [TUIC](./tuic/)                 |
 | `hysteria2`    | [Hysteria2](./hysteria2/)       |
+| `queqiao`      | [Queqiao](./queqiao/)           |
 | `anytls`       | [AnyTLS](./anytls/)             |
 | `snell`        | [Snell](./snell/)               |
 | `tor`          | [Tor](./tor/)                   |

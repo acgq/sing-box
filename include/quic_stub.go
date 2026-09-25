@@ -36,6 +36,9 @@ func init() {
 }
 
 func registerQUICInbounds(registry *inbound.Registry) {
+	inbound.Register[option.QueqiaoInboundOptions](registry, C.TypeQueqiao, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.QueqiaoInboundOptions) (adapter.Inbound, error) {
+		return nil, C.ErrQUICNotIncluded
+	})
 	inbound.Register[option.HysteriaInboundOptions](registry, C.TypeHysteria, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HysteriaInboundOptions) (adapter.Inbound, error) {
 		return nil, C.ErrQUICNotIncluded
 	})
@@ -51,6 +54,9 @@ func registerQUICInbounds(registry *inbound.Registry) {
 }
 
 func registerQUICOutbounds(registry *outbound.Registry) {
+	outbound.Register[option.QueqiaoOutboundOptions](registry, C.TypeQueqiao, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.QueqiaoOutboundOptions) (adapter.Outbound, error) {
+		return nil, C.ErrQUICNotIncluded
+	})
 	outbound.Register[option.HysteriaOutboundOptions](registry, C.TypeHysteria, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HysteriaOutboundOptions) (adapter.Outbound, error) {
 		return nil, C.ErrQUICNotIncluded
 	})
