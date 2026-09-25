@@ -25,24 +25,43 @@ func RegisterInbound(r *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	ctx      context.Context
-	cancel   context.CancelFunc
-	router   adapter.Router
-	logger   log.ContextLogger
-	listener *listener.Listener
-	server   *Q.Server
-	tcp, udp bool
-	wg       sync.WaitGroup
-	provider *Q.Provider
+	ctx           context.Context
+	cancel        context.CancelFunc
+	router        adapter.Router
+	logger        log.ContextLogger
+	listener      *listener.Listener
+	server        *Q.Server
+	tcp, udp      bool
+	wg            sync.WaitGroup
+	provider      *Q.Provider
+	listenOptions option.ListenOptions
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.QueqiaoInboundOptions) (adapter.Inbound, error) {
-	if options.ProviderPath == "" {
-		return nil, errors.New("missing provider_path")
+	if options.HopPortCount < 0 || options.HopPortCount > 100 {
+		return nil, errors.New("hop_port_count must be between 0 and 100")
 	}
-	provider, err := Q.LoadProvider(filemanager.BasePath(ctx, os.ExpandEnv(options.ProviderPath)))
-	if err != nil {
-		return nil, err
+	var provider *Q.Provider
+	var credentials Q.ServerCredentials
+	var enrollment *Q.EnrollmentService
+	if options.ProviderPath != "" {
+		if options.ProviderID != "" || options.GatewayID != "" || options.RootCertificate != "" ||
+			options.GatewayCertificate != "" || options.GatewayPrivateKey != "" || len(options.Users) != 0 {
+			return nil, errors.New("provider_path and inline Queqiao identity are mutually exclusive")
+		}
+		var err error
+		provider, err = Q.LoadProvider(filemanager.BasePath(ctx, os.ExpandEnv(options.ProviderPath)))
+		if err != nil {
+			return nil, err
+		}
+		credentials = provider.ServerCredentials()
+		enrollment = &Q.EnrollmentService{Provider: provider}
+	} else {
+		var err error
+		credentials, err = inlineServerCredentials(options)
+		if err != nil {
+			return nil, err
+		}
 	}
 	tcp, udp := true, true
 	switch options.Transport {
@@ -55,9 +74,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, errors.New("invalid queqiao transport")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	i := &Inbound{Adapter: inbound.NewAdapter(Type, tag), ctx: runCtx, cancel: cancel, router: router, logger: logger, tcp: tcp, udp: udp}
+	i := &Inbound{Adapter: inbound.NewAdapter(Type, tag), ctx: runCtx, cancel: cancel, router: router, logger: logger, tcp: tcp, udp: udp, listenOptions: options.ListenOptions}
 	i.listener = listener.New(listener.Options{Context: runCtx, Logger: logger, Listen: options.ListenOptions})
-	server, err := Q.NewServer(Q.ServerConfig{ListenAddr: ":0", Credentials: provider.ServerCredentials(), Enrollment: &Q.EnrollmentService{Provider: provider}, EnableTCP: tcp, EnableQUIC: udp, Congestion: Q.CongestionControlKind(options.Congestion), MaxSessions: options.MaxSessions, DialDestination: i.dialDestination, ListenDestinationPacket: i.listenDestinationPacket, Logger: newLogger(logger)})
+	server, err := Q.NewServer(Q.ServerConfig{ListenAddr: ":0", Credentials: credentials, Enrollment: enrollment, EnableTCP: tcp, EnableQUIC: udp, Congestion: Q.CongestionControlKind(options.Congestion), MaxSessions: options.MaxSessions, HopPortCount: options.HopPortCount, DialDestination: i.dialDestination, ListenDestinationPacket: i.listenDestinationPacket, Logger: newLogger(logger)})
 	if err != nil {
 		cancel()
 		return nil, err
@@ -107,25 +126,33 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 		}()
 	}
 	run(func() error { i.server.WatchAuthorization(i.ctx); return nil })
-	run(func() error {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-i.ctx.Done():
-				return nil
-			case <-ticker.C:
-				if _, e := i.provider.RenewGatewayIdentity(time.Now(), 7*24*time.Hour); e != nil {
-					i.logger.ErrorContext(i.ctx, "renew gateway identity: ", e)
+	if i.provider != nil {
+		run(func() error {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-i.ctx.Done():
+					return nil
+				case <-ticker.C:
+					if _, e := i.provider.RenewGatewayIdentity(time.Now(), 7*24*time.Hour); e != nil {
+						i.logger.ErrorContext(i.ctx, "renew gateway identity: ", e)
+					}
 				}
 			}
-		}
-	})
+		})
+	}
 	if tcp != nil {
 		run(func() error { return i.server.ServeListener(i.ctx, tcp) })
 	}
 	if udp != nil {
-		run(func() error { return i.server.ServePacketConn(i.ctx, udp) })
+		run(func() error {
+			return i.server.ServePacketConnWithHops(i.ctx, udp, func(port int) (net.PacketConn, error) {
+				listenOptions := i.listenOptions
+				listenOptions.ListenPort = uint16(port)
+				return listener.New(listener.Options{Context: i.ctx, Logger: i.logger, Listen: listenOptions}).ListenUDP()
+			})
+		})
 	}
 	return nil
 }

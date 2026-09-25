@@ -45,21 +45,43 @@ type Outbound struct {
 }
 
 func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, options option.QueqiaoOutboundOptions) (adapter.Outbound, error) {
-	if options.ProfilePath == "" {
-		return nil, errors.New("missing profile_path")
+	if options.HopPortCount < 0 || options.HopPortCount > 100 {
+		return nil, errors.New("hop_port_count must be between 0 and 100")
 	}
-	profile, err := Q.LoadClientProfile(filemanager.BasePath(ctx, os.ExpandEnv(options.ProfilePath)))
-	if err != nil {
-		return nil, err
+	var profile Q.ClientProfile
+	var credentials Q.ClientCredentials
+	var remote string
+	var profilePath string
+	hopPortCount := options.HopPortCount
+	if options.ProfilePath != "" {
+		if options.ProviderID != "" || options.GatewayID != "" || options.RootCertificate != "" ||
+			options.DeviceCertificate != "" || options.DevicePrivateKey != "" {
+			return nil, errors.New("profile_path and inline Queqiao identity are mutually exclusive")
+		}
+		profilePath = filemanager.BasePath(ctx, os.ExpandEnv(options.ProfilePath))
+		var err error
+		profile, err = Q.LoadClientProfile(profilePath)
+		if err != nil {
+			return nil, err
+		}
+		credentials, err = profile.Credentials()
+		if err != nil {
+			return nil, err
+		}
+		remote = profile.Endpoint
+		if hopPortCount == 0 {
+			hopPortCount = profile.HopPortCount
+		}
+	} else {
+		var err error
+		credentials, err = inlineClientCredentials(options)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if profile.HopPortCount >= 2 {
-		return nil, errors.New("profile port hopping is not supported by the embedded host dialer")
+	if hopPortCount < 0 || hopPortCount > 100 {
+		return nil, errors.New("profile hop_port_count must be between 0 and 100")
 	}
-	credentials, err := profile.Credentials()
-	if err != nil {
-		return nil, err
-	}
-	remote := profile.Endpoint
 	if options.Server == "" && options.ServerPort != 0 {
 		return nil, errors.New("server_port requires server")
 	}
@@ -68,6 +90,9 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 			return nil, errors.New("missing server_port")
 		}
 		remote = options.ServerOptions.Build().String()
+	}
+	if remote == "" {
+		return nil, errors.New("missing Queqiao server and server_port")
 	}
 	destination := M.ParseSocksaddr(remote)
 	transport := options.Transport
@@ -86,12 +111,12 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		}
 	}
 	hostDialer := &outerDialer{d, service.FromContext[adapter.DNSRouter](ctx), query}
-	engine, err := Q.NewClient(Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, OuterDialer: hostDialer, Logger: newLogger(logger)})
+	engine, err := Q.NewClient(Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, HopPortCount: hopPortCount, OuterDialer: hostDialer, Logger: newLogger(logger)})
 	if err != nil {
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions), ctx: runCtx, cancel: cancel, client: engine, profile: profile, profilePath: filemanager.BasePath(ctx, os.ExpandEnv(options.ProfilePath)), remote: remote, identityDialer: hostDialer, logger: logger}, nil
+	return &Outbound{Adapter: outbound.NewAdapterWithDialerOptions(Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions), ctx: runCtx, cancel: cancel, client: engine, profile: profile, profilePath: profilePath, remote: remote, identityDialer: hostDialer, logger: logger}, nil
 }
 
 func (o *Outbound) Start(stage adapter.StartStage) error {
@@ -103,6 +128,9 @@ func (o *Outbound) Start(stage adapter.StartStage) error {
 		return err
 	}
 	go func(ctx context.Context, finish func()) { defer finish(); o.client.Warmup(ctx) }(ctx, finish)
+	if o.profilePath == "" {
+		return nil
+	}
 	ctx, finish, err = o.begin(o.ctx)
 	if err != nil {
 		return err

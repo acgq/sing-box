@@ -90,7 +90,7 @@ func HopPorts(providerID string, primaryPort, count int) []int {
 // the only writer of currentIdx and is called at most once per cooldown
 // window.
 type ClientPortMux struct {
-	conn        *net.UDPConn
+	conn        net.PacketConn
 	primaryAddr *net.UDPAddr
 	ports       []int
 	currentIdx  atomic.Int32
@@ -111,7 +111,7 @@ type ClientPortMux struct {
 // NewClientPortMux creates a mux on conn. primaryAddr must match ports[0].
 // The mux starts on the primary port; call HopController.Run to begin loss
 // monitoring.
-func NewClientPortMux(conn *net.UDPConn, primaryAddr *net.UDPAddr, ports []int) *ClientPortMux {
+func NewClientPortMux(conn net.PacketConn, primaryAddr *net.UDPAddr, ports []int) *ClientPortMux {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ClientPortMux{
 		conn:        conn,
@@ -224,12 +224,26 @@ func (m *ClientPortMux) SetWriteDeadline(t time.Time) error {
 
 // — net.Conn (required by transientRoutePacketConn's type assertion) —
 
-func (m *ClientPortMux) Read(b []byte) (int, error)  { return m.conn.Read(b) }
-func (m *ClientPortMux) Write(b []byte) (int, error) { return m.conn.Write(b) }
-func (m *ClientPortMux) RemoteAddr() net.Addr        { return m.primaryAddr }
+func (m *ClientPortMux) Read(b []byte) (int, error) {
+	if conn, ok := m.conn.(net.Conn); ok {
+		return conn.Read(b)
+	}
+	n, _, err := m.ReadFrom(b)
+	return n, err
+}
+func (m *ClientPortMux) Write(b []byte) (int, error) {
+	if conn, ok := m.conn.(net.Conn); ok {
+		return conn.Write(b)
+	}
+	return m.WriteTo(b, m.primaryAddr)
+}
+func (m *ClientPortMux) RemoteAddr() net.Addr { return m.primaryAddr }
 
 func (m *ClientPortMux) SetReadBuffer(bytes int) error {
-	return m.conn.SetReadBuffer(bytes)
+	if conn, ok := m.conn.(interface{ SetReadBuffer(int) error }); ok {
+		return conn.SetReadBuffer(bytes)
+	}
+	return nil
 }
 
 // — ServerPortMux —
@@ -239,7 +253,7 @@ func (m *ClientPortMux) SetReadBuffer(bytes int) error {
 type serverPacket struct {
 	data []byte
 	src  *net.UDPAddr
-	conn *net.UDPConn // socket the datagram arrived on
+	conn net.PacketConn // socket the datagram arrived on
 }
 
 // ServerPortMux listens on N UDP ports simultaneously and presents them as a
@@ -255,8 +269,8 @@ type serverPacket struct {
 //
 // Thread safety: all exported methods are safe for concurrent use.
 type ServerPortMux struct {
-	primary     *net.UDPConn
-	secondaries []*net.UDPConn
+	primary     net.PacketConn
+	secondaries []net.PacketConn
 	// skipped records hop ports the host refused, so a degraded pool is
 	// visible in the log rather than silently narrower than configured.
 	skipped []int
@@ -291,22 +305,35 @@ type ServerPortMux struct {
 // evades anything.
 //
 // On error, any successfully opened extra sockets are closed before returning.
-func NewServerPortMux(primary *net.UDPConn, ports []int) (*ServerPortMux, error) {
+func NewServerPortMux(primary net.PacketConn, ports []int, bind ...func(int) (net.PacketConn, error)) (*ServerPortMux, error) {
 	primaryAddr, ok := primary.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return nil, fmt.Errorf("server portmux: primary socket has non-UDP local address")
 	}
 
-	secondaries := make([]*net.UDPConn, 0, len(ports)-1)
+	secondaries := make([]net.PacketConn, 0, len(ports)-1)
 	var skipped []int
 	var lastErr error
 	for _, port := range ports[1:] {
 		addr := &net.UDPAddr{IP: primaryAddr.IP, Port: port}
-		conn, err := net.ListenUDP("udp", addr)
+		var conn net.PacketConn
+		var err error
+		if len(bind) > 0 && bind[0] != nil {
+			conn, err = bind[0](port)
+		} else {
+			conn, err = net.ListenUDP("udp", addr)
+		}
 		if err != nil {
 			skipped = append(skipped, port)
 			lastErr = err
 			continue
+		}
+		if bound, ok := conn.LocalAddr().(*net.UDPAddr); !ok || bound.Port != port {
+			_ = conn.Close()
+			for _, secondary := range secondaries {
+				_ = secondary.Close()
+			}
+			return nil, fmt.Errorf("server portmux: secondary listener did not bind port %d", port)
 		}
 		secondaries = append(secondaries, conn)
 	}
@@ -342,7 +369,7 @@ func (m *ServerPortMux) SkippedPorts() []int { return m.skipped }
 // readSocket copies datagrams from one listening socket into the merged
 // incoming queue, tagging each with the socket it arrived on so replies can
 // take the same path back.
-func (m *ServerPortMux) readSocket(conn *net.UDPConn) {
+func (m *ServerPortMux) readSocket(conn net.PacketConn) {
 	defer m.wg.Done()
 	buf := make([]byte, 1500)
 	for {
@@ -364,9 +391,9 @@ func (m *ServerPortMux) readSocket(conn *net.UDPConn) {
 
 // pickConn returns the socket most recently used by addr, falling back to the
 // primary socket if no mapping exists.
-func (m *ServerPortMux) pickConn(addr *net.UDPAddr) *net.UDPConn {
+func (m *ServerPortMux) pickConn(addr *net.UDPAddr) net.PacketConn {
 	if v, ok := m.routes.Load(addr.String()); ok {
-		return v.(*net.UDPConn)
+		return v.(net.PacketConn)
 	}
 	return m.primary
 }
@@ -454,5 +481,8 @@ func (m *ServerPortMux) SetWriteDeadline(t time.Time) error {
 }
 
 func (m *ServerPortMux) SetReadBuffer(bytes int) error {
-	return m.primary.SetReadBuffer(bytes)
+	if conn, ok := m.primary.(interface{ SetReadBuffer(int) error }); ok {
+		return conn.SetReadBuffer(bytes)
+	}
+	return nil
 }

@@ -366,6 +366,9 @@ func (s *Server) Serve(ctx context.Context) error {
 // written, because a store that silently starts working again leaves an
 // operator reading an error with no ending.
 func (s *Server) watchAuthorizationStore(ctx context.Context) {
+	if s.cfg.Credentials.Store.IsStatic() {
+		return
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var watch authorizationWatch

@@ -3,8 +3,10 @@ package pep
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 
+	"github.com/sagernet/sing-box/third_party/queqiao/internal/portmux"
 	"github.com/sagernet/sing-box/third_party/queqiao/internal/session"
 )
 
@@ -76,3 +78,25 @@ func (c *Client) Close() error                           { c.closeQUICPool(); re
 func (c *Client) Warmup(ctx context.Context)             { c.prewarmPath(ctx) }
 func (s *Server) WatchAuthorization(ctx context.Context) { s.watchAuthorizationStore(ctx) }
 func (s *Server) CloseRetainedPackets()                  { s.udpRelays.closeAll() }
+
+// ServePacketConnWithHops uses host-bound UDP sockets for every native
+// Queqiao hop port. The host chooses socket options and network namespace.
+func (s *Server) ServePacketConnWithHops(ctx context.Context, primary net.PacketConn, bind func(int) (net.PacketConn, error)) error {
+	if s.cfg.HopPortCount < 2 {
+		return s.ServePacketConn(ctx, primary)
+	}
+	address, ok := primary.LocalAddr().(*net.UDPAddr)
+	if !ok || address.Port == 0 {
+		_ = primary.Close()
+		return errors.New("Queqiao hop listener requires a bound UDP address")
+	}
+	ports := portmux.HopPorts(s.cfg.Credentials.ProviderID, address.Port, s.cfg.HopPortCount)
+	mux, err := portmux.NewServerPortMux(primary, ports, bind)
+	if err != nil {
+		_ = primary.Close()
+		return fmt.Errorf("create Queqiao hop listener: %w", err)
+	}
+	s.cfg.Logger.Info("Queqiao port hop listener ready", "primary_addr", address,
+		"hop_ports_configured", len(ports), "hop_ports_unavailable", mux.SkippedPorts())
+	return s.ServePacketConn(ctx, mux)
+}
