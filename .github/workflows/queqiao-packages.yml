@@ -1,0 +1,135 @@
+name: Queqiao packages
+
+on:
+  pull_request:
+    branches: [stable]
+  push:
+    branches: [stable]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: queqiao-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      package: ${{ steps.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+      - name: Set package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
+          version=${tag#v}
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-list -n 1 "$tag")" ]]; then
+            # A numeric suffix is accepted by Debian, opkg and apk, and grows
+            # between branch builds so router package managers can upgrade.
+            version="${version}.0${GITHUB_RUN_NUMBER}"
+          fi
+          echo "package=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-amd64, os: linux, arch: amd64, debian: amd64 }
+          - { target: linux-arm64, os: linux, arch: arm64, debian: arm64, openwrt: true }
+          - { target: windows-amd64, os: windows, arch: amd64 }
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+      VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build sing-box with Queqiao
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # These self-contained builds retain the usual proxy features and
+          # include QUIC, but do not require the external Cronet library.
+          tags='with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_purego'
+          output=dist/sing-box
+          if [[ "$GOOS" == windows ]]; then output=dist/sing-box.exe; fi
+          go build -trimpath -tags "$tags" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' $(cat release/LDFLAGS) -s -w -buildid=" \
+            -o "$output" ./cmd/sing-box
+          if [[ "$GOOS" == linux && "$GOARCH" == amd64 ]]; then
+            "$output" version
+          fi
+      - name: Package Debian
+        if: matrix.debian != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo gem install fpm --no-document
+          cp .fpm_systemd .fpm
+          fpm -t deb -v "$VERSION" --architecture '${{ matrix.debian }}' \
+            -p "dist/sing-box_${VERSION}_linux_${{ matrix.debian }}.deb" \
+            dist/sing-box=/usr/bin/sing-box
+      - name: Package OpenWrt IPK
+        if: matrix.openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .fpm_openwrt .fpm
+          fpm -t deb -v "$VERSION" --architecture all \
+            -p dist/openwrt.deb dist/sing-box=/usr/bin/sing-box
+          for arch in aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76 aarch64_generic; do
+            .github/deb2ipk.sh "$arch" dist/openwrt.deb "dist/sing-box_${VERSION}_openwrt_${arch}.ipk"
+          done
+          rm dist/openwrt.deb
+      - name: Install apk-tools
+        if: matrix.openwrt
+        shell: bash
+        run: |
+          docker run --rm -v /usr/local/bin:/mnt alpine:edge sh -c \
+            'apk add --no-cache apk-tools-static && cp /sbin/apk.static /mnt/apk && chmod +x /mnt/apk'
+      - name: Package OpenWrt APK
+        if: matrix.openwrt
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76 aarch64_generic; do
+            .github/build_openwrt_apk.sh "$arch" "$VERSION" dist/sing-box \
+              "dist/sing-box_${VERSION}_openwrt_${arch}.apk"
+          done
+      - name: Name Windows executable
+        if: matrix.os == 'windows'
+        shell: bash
+        run: mv dist/sing-box.exe "dist/sing-box_${VERSION}_windows_amd64.exe"
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.deb' -o -name '*.ipk' -o -name '*.apk' -o -name '*.exe' \) \
+            -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.target }}
+          path: |
+            dist/*.deb
+            dist/*.ipk
+            dist/*.apk
+            dist/*.exe
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
