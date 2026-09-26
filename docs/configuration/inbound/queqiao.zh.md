@@ -3,6 +3,20 @@
 支持 Queqiao v0.6.3 协议 1，使用 sing-box 同版本的 SagerNet QUIC。
 编译时启用 `with_quic`。
 
+可以用一条命令自动生成完整的服务端和客户端配置，无需手填 ID、证书或私钥：
+
+```sh
+sing-box generate queqiao --server 203.0.113.1 \
+  --server-output queqiao-server.json --client-output queqiao-client.json
+```
+
+默认签发有效期 10 年的网关和设备证书，启用 4 个 UDP 跳跃端口，并在客户端
+本机 1080 端口建立 mixed 代理。可用 `--valid-years` 指定 1–10 年。
+现有服务器可加 `--server-base /etc/sing-box/config.json`，保留其他配置，
+替换标签为 `queqiao-in` 的入站。输出文件在 Unix 上以 0600 权限创建，
+且不覆盖现有文件；在 Windows 上请设置合适的文件 ACL。部署前分别运行
+`sing-box check`。客户端配置含设备私钥，须私密传输。
+
 ```json
 {
   "type": "queqiao",
@@ -47,3 +61,6 @@
 内联模式运行时无需其他文件，但不执行设备注册和证书自动续期；请在证书
 到期前更新配置。现有配置仍可改用 `provider_path`，保留授权文件热加载和
 网关证书自动续期；它不能与内联身份字段同时使用。
+生成命令不会保存 CA 私钥，因此今后增加设备或续签证书需要重新生成整套配置
+并迁移客户端。长期有效的设备私钥一旦泄露，可被更久地使用；从 `users`
+中删除对应设备即可撤销授权。

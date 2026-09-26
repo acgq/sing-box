@@ -411,6 +411,10 @@ func verifyGatewayCertificate(certificate tls.Certificate, root *x509.Certificat
 }
 
 func newRoot(name string, now time.Time) (*x509.Certificate, ed25519.PrivateKey, error) {
+	return newRootUntil(name, now, now.AddDate(10, 0, 0))
+}
+
+func newRootUntil(name string, now, notAfter time.Time) (*x509.Certificate, ed25519.PrivateKey, error) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate provider root key: %w", err)
@@ -422,7 +426,7 @@ func newRoot(name string, now time.Time) (*x509.Certificate, ed25519.PrivateKey,
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: name + " Queqiao provider root"},
-		NotBefore:    now.Add(-certificateClockSkew), NotAfter: now.AddDate(10, 0, 0),
+		NotBefore:    now.Add(-certificateClockSkew), NotAfter: notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true, IsCA: true, MaxPathLen: 1,
 	}
@@ -438,6 +442,10 @@ func newRoot(name string, now time.Time) (*x509.Certificate, ed25519.PrivateKey,
 }
 
 func newIssuer(parent *x509.Certificate, parentKey ed25519.PrivateKey, commonName, providerID, role string, usage x509.ExtKeyUsage, now time.Time) (*x509.Certificate, ed25519.PrivateKey, error) {
+	return newIssuerUntil(parent, parentKey, commonName, providerID, role, usage, now, now.AddDate(5, 0, 0))
+}
+
+func newIssuerUntil(parent *x509.Certificate, parentKey ed25519.PrivateKey, commonName, providerID, role string, usage x509.ExtKeyUsage, now, notAfter time.Time) (*x509.Certificate, ed25519.PrivateKey, error) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate %s key: %w", role, err)
@@ -449,7 +457,7 @@ func newIssuer(parent *x509.Certificate, parentKey ed25519.PrivateKey, commonNam
 	uri, _ := url.Parse(fmt.Sprintf("queqiao://%s/%s", providerID, role))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, URIs: []*url.URL{uri},
-		NotBefore: now.Add(-certificateClockSkew), NotAfter: now.AddDate(5, 0, 0),
+		NotBefore: now.Add(-certificateClockSkew), NotAfter: notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{usage},
 		BasicConstraintsValid: true, IsCA: true, MaxPathLenZero: true,
@@ -499,6 +507,10 @@ func newLeaf(parent *x509.Certificate, parentKey ed25519.PrivateKey, identity *u
 }
 
 func (p *Provider) IssueDevice(accountID, deviceID string, publicKey ed25519.PublicKey, now time.Time) ([]byte, error) {
+	return p.issueDeviceWithTTL(accountID, deviceID, publicKey, now, defaultDeviceTTL)
+}
+
+func (p *Provider) issueDeviceWithTTL(accountID, deviceID string, publicKey ed25519.PublicKey, now time.Time, ttl time.Duration) ([]byte, error) {
 	if !validID(accountID) || !validID(deviceID) {
 		return nil, errors.New("invalid account or device identity")
 	}
@@ -513,7 +525,7 @@ func (p *Provider) IssueDevice(accountID, deviceID string, publicKey ed25519.Pub
 		return nil, err
 	}
 	identity := deviceURI(p.Metadata.ProviderID, accountID, deviceID)
-	notAfter := now.Add(defaultDeviceTTL)
+	notAfter := now.Add(ttl)
 	if p.DeviceIssuer.NotAfter.Before(notAfter) {
 		notAfter = p.DeviceIssuer.NotAfter
 	}

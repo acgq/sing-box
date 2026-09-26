@@ -4,6 +4,24 @@ Queqiao protocol 1 inbound, compatible with Queqiao v0.6.3. Build sing-box
 with `with_quic`; its SagerNet QUIC module is shared with the other QUIC
 protocols.
 
+Generate a complete server/client configuration pair without entering IDs,
+certificates, or keys by hand:
+
+```sh
+sing-box generate queqiao --server 203.0.113.1 \
+  --server-output queqiao-server.json --client-output queqiao-client.json
+```
+
+The generator defaults to 10-year gateway and device certificates, four UDP
+hop ports, and a local mixed client proxy on port 1080. Use `--valid-years`
+to select 1–10 years. On an existing server, pass
+`--server-base /etc/sing-box/config.json` to preserve its other settings and
+replace the `queqiao-in` inbound. Both output files are created with mode 0600
+on Unix and existing files are never overwritten. On Windows, protect them
+with an appropriate file ACL. Run `sing-box check` on each output
+before deploying it. Transfer the client configuration privately: it contains
+the device private key.
+
 ```json
 {
   "type": "queqiao",
@@ -55,3 +73,7 @@ certificate renewal: provision devices separately and replace expiring
 certificates in the sing-box configuration before expiry. For existing
 deployments, `provider_path` remains available instead of the inline fields;
 that mode retains authorization reload and automatic gateway renewal.
+The generator discards its CA private keys, so additional devices and certificate
+renewal require a new configuration pair and client migration. A longer-lived
+device key also remains usable longer if stolen; remove its `users` entry to
+revoke it.
