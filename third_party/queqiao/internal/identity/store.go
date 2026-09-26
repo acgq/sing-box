@@ -163,9 +163,10 @@ type Authorization struct {
 // tokens only; no client private key or reusable shared tunnel secret is ever
 // written to provider state.
 type Store struct {
-	path string
-	mu   sync.RWMutex
-	data storeData
+	path   string
+	static bool
+	mu     sync.RWMutex
+	data   storeData
 	// lastGoodAt is when data was last replaced by a complete snapshot read
 	// from disk. It is the only way to say how old the authorization state
 	// being enforced actually is: when a refresh fails the previous snapshot
@@ -174,6 +175,61 @@ type Store struct {
 	// that missed a single tick.
 	lastGoodAt time.Time
 }
+
+// StaticUser is a device admitted by a configuration-backed gateway. Multiple
+// devices may share an account ID when their name and account limits agree.
+type StaticUser struct {
+	Name       string
+	DeviceName string
+	AccountID  string
+	DeviceID   string
+	PublicKey  string
+	MaxFlows   int
+	MaxClients int
+	ExpiresAt  string
+}
+
+// NewStaticStore creates an authorization snapshot without a state file.
+// Updating or revoking a user requires reloading the host configuration.
+func NewStaticStore(users []StaticUser) (*Store, error) {
+	if len(users) == 0 {
+		return nil, errors.New("at least one Queqiao user is required")
+	}
+	data := emptyStoreData()
+	now := time.Now()
+	createdAt := now.Add(-time.Second).UTC().Format(time.RFC3339)
+	for _, user := range users {
+		account := Account{
+			ID: user.AccountID, Name: user.Name, Enabled: true,
+			ExpiresAt: user.ExpiresAt, MaxFlows: user.MaxFlows,
+			MaxClients: user.MaxClients, CreatedAt: createdAt,
+		}
+		if existing, found := data.Accounts[user.AccountID]; found {
+			if existing != account {
+				return nil, fmt.Errorf("conflicting Queqiao account %s", user.AccountID)
+			}
+		} else {
+			data.Accounts[user.AccountID] = account
+		}
+		if _, duplicate := data.Devices[user.DeviceID]; duplicate {
+			return nil, fmt.Errorf("duplicate Queqiao device %s", user.DeviceID)
+		}
+		deviceName := user.DeviceName
+		if deviceName == "" {
+			deviceName = user.Name
+		}
+		data.Devices[user.DeviceID] = Device{
+			ID: user.DeviceID, AccountID: user.AccountID, Name: deviceName,
+			PublicKey: user.PublicKey, Enabled: true, CreatedAt: createdAt,
+		}
+	}
+	if err := validateStoreData(data); err != nil {
+		return nil, fmt.Errorf("invalid Queqiao users: %w", err)
+	}
+	return &Store{static: true, data: data, lastGoodAt: now}, nil
+}
+
+func (s *Store) IsStatic() bool { return s.static }
 
 // A consumed invitation is retained after its advertised expiry so a client
 // that durably saved its key but lost the enrollment response can recover.
@@ -233,6 +289,9 @@ func (s *Store) Load() error {
 // new complete snapshot; a malformed replacement is rejected and the last
 // known-good authorization state remains active.
 func (s *Store) Refresh() (bool, error) {
+	if s.static {
+		return false, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	decoded, err := readStoreData(s.path)

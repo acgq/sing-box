@@ -21,6 +21,8 @@ type EnrollmentService = identity.EnrollmentService
 type AccountLimits = identity.AccountLimits
 type ClientCredentials = identity.ClientCredentials
 type ServerCredentials = identity.ServerCredentials
+type StaticUser = identity.StaticUser
+type InlineBundle = identity.InlineBundle
 type DialOptions = identity.DialOptions
 
 var NewClient = pep.NewClient
@@ -30,3 +32,6 @@ var LoadProvider = identity.LoadProvider
 var InitProvider = identity.InitProvider
 var RenewProfileWithOptions = identity.RenewProfileWithOptions
 var PeerAddressFromContext = pep.PeerAddressFromContext
+var NewStaticStore = identity.NewStaticStore
+var RootPin = identity.RootPin
+var GenerateInlineBundle = identity.GenerateInlineBundle

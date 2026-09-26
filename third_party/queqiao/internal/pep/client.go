@@ -40,6 +40,11 @@ const (
 
 	maxLaneRecoveryAttempts = 8
 	laneRecoveryResetAfter  = 5 * time.Minute
+	// A replacement QUIC lane may authenticate while its path still drops
+	// application payload. Watch established transfers after rescue and give
+	// the lane a short chance to prove forward progress before using TCP.
+	stalledRecoveryTCPGrace = 5 * time.Second
+	stalledRecoveryMinBytes = 64 * 1024
 	// laneJoinCapacityTCPCommit is how many consecutive capacity answers a
 	// recovery path takes before it stops believing the answer is transient.
 	// One or two in a row are the ordinary losers of a rescue race; at three
@@ -199,7 +204,10 @@ type ClientConfig struct {
 	// maintain a pool of that many ports derived from the provider ID and hop
 	// reactively when sustained zero-receive loss is detected.
 	HopPortCount int
-	Logger       *slog.Logger
+	// HopPorts is an explicit list of additional UDP ports. It replaces
+	// HopPortCount when configured; the primary RemoteAddr port remains in the pool.
+	HopPorts []int
+	Logger   *slog.Logger
 }
 
 type Client struct {
@@ -1155,15 +1163,20 @@ const transientUDPSendLogInterval = 5 * time.Second
 // which disables port hopping in dialQUICConnection. All dials share one
 // HopWalk so port selection persists across connection attempts.
 func (c *Client) hopDialConfig() hopDialConfig {
-	if c.cfg.HopPortCount < 2 {
+	count := c.cfg.HopPortCount
+	if len(c.cfg.HopPorts) > 0 {
+		count = len(c.cfg.HopPorts) + 1
+	}
+	if count < 2 {
 		return hopDialConfig{}
 	}
 	c.hopWalkOnce.Do(func() {
-		c.hopWalk = portmux.NewHopWalk(c.cfg.HopPortCount)
+		c.hopWalk = portmux.NewHopWalk(count)
 	})
 	return hopDialConfig{
-		portCount:  c.cfg.HopPortCount,
+		portCount:  count,
 		providerID: c.cfg.Credentials.ProviderID,
+		ports:      c.cfg.HopPorts,
 		walk:       c.hopWalk,
 		metrics:    c.cfg.Metrics,
 		logger:     c.cfg.Logger,
@@ -1968,6 +1981,18 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	var nextRecovery time.Time
 	recoveryAttempts := 0
 	var lastRecoveryAttempt time.Time
+	var watchRescueProgress bool
+	var lastRescueBytes uint64
+	var lastRescueProgress time.Time
+	var nextTCPHandoff time.Time
+	beginRescueWatch := func() {
+		if watchRescueProgress || c.cfg.Transport != TransportAuto {
+			return
+		}
+		watchRescueProgress = true
+		lastRescueBytes = flow.snapshot().Bytes
+		lastRescueProgress = time.Now()
+	}
 	var isolationBlockedUntil time.Time
 	var isolationBackoff time.Duration
 	isolationAttempts := 0
@@ -2030,6 +2055,7 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 			} else {
 				// A fresh lane must prove itself before the next round of
 				// dials; the watchdog will re-signal if the stall is real.
+				beginRescueWatch()
 				stallBackoff = 0
 				nextStallRescue = time.Now().Add(time.Second)
 			}
@@ -2141,6 +2167,7 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 					}
 					nextRecovery = now.Add(recoveryBackoff)
 				} else {
+					beginRescueWatch()
 					// A replacement that succeeds its handshake can still fail
 					// immediately. Keep a bounded exponential delay between all
 					// attempts, not only failed handshakes.
@@ -2166,6 +2193,32 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 				recoveryBackoff = 0
 				nextRecovery = time.Time{}
 				lastRecoveryAttempt = time.Time{}
+			}
+			if watchRescueProgress {
+				if snapshot.Bytes > lastRescueBytes {
+					lastRescueBytes = snapshot.Bytes
+					lastRescueProgress = now
+				}
+				if c.cfg.Transport == TransportAuto && !hasTCPLane(flow) && snapshot.Bytes >= stalledRecoveryMinBytes &&
+					!flow.doneChanClosed() && now.Sub(lastRescueProgress) >= stalledRecoveryTCPGrace &&
+					!now.Before(nextTCPHandoff) {
+					// A QUIC JOIN may authenticate while bulk data remains
+					// blackholed. Hand the same logical flow to TCP before the
+					// application's receive timeout expires.
+					nextTCPHandoff = now.Add(stalledRecoveryTCPGrace)
+					laneID, err := flow.allocateJoinID()
+					if err == nil {
+						c.cfg.Logger.Warn("QUIC rescue made no application progress; trying TCP handoff", "flow_id", flowID)
+						var lane *mpLane
+						lane, err = c.openJoinLane(manageCtx, TransportTCP, sessionID, flowID, laneID)
+						if err == nil {
+							err = c.installRecoveryLane(flow, lane)
+						}
+					}
+					if err != nil && manageCtx.Err() == nil && !flow.doneChanClosed() {
+						c.cfg.Logger.Warn("TCP handoff after stalled QUIC rescue unavailable", "flow_id", flowID, "error", err)
+					}
+				}
 			}
 			// Once a TCP rescue lane is installed, keep the session on it.
 			if hasTCPLane(flow) {

@@ -1,30 +1,37 @@
 # Queqiao 出站
 
-此出站集成 Queqiao v0.6.3 协议 1，支持 TCP 与 UDP，使用 sing-box
-同版本的 `github.com/sagernet/quic-go`。编译时需启用 `with_quic`。
+支持 Queqiao v0.6.3 协议 1 的 TCP 与 UDP 流量。编译时启用 `with_quic`。
 
 ```json
 {
   "type": "queqiao",
   "tag": "queqiao-out",
-  "profile_path": "client-profile.json",
+  "server": "example.com",
+  "server_port": 18443,
+  "provider_id": "服务商 ID",
+  "gateway_id": "网关 ID",
+  "root_certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+  "device_certificate": "-----BEGIN CERTIFICATE-----\n...完整设备证书链...\n-----END CERTIFICATE-----",
+  "device_private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
   "transport": "auto",
-  "congestion": "erasure"
+  "congestion": "erasure",
+  "hop_ports": ["20000:20031"]
 }
 ```
 
-`profile_path` 必填，指向由 `queqiaod enroll` 创建的设备配置文件，其中
-包含固定的服务端身份、设备证书和私钥。出站每小时检查证书续期，并原子写回
-配置文件；sing-box 进程需要对该文件有写权限。
+内联字段对应一份已注册的 Queqiao 设备档案。根证书用于固定服务商身份；
+每次连接均验证网关 ID 和证书链。配置包含设备私钥，须限制文件权限。
+内联模式必须设置 `server` 和 `server_port`。
 
-`transport` 可为 `auto`（默认，QUIC 失败时可回退到 TLS/TCP）、`quic`
-或 `tcp`。即使只用 TCP，当前适配仍需 `with_quic` 构建标签。
-`congestion` 默认为 Queqiao 的 `erasure` 控制器；固定速率的
-`brutal` 暂不可用。`max_sessions` 为应用会话上限，零表示使用核心默认值。
+`transport` 可为 `auto`（默认，QUIC 连接池及 TLS/TCP 回退）、`quic`
+或 `tcp`。`hop_ports` 可填写 UDP 端口和包含两端的区间，必须与入站设置
+相同；主 `server_port` 也在端口池中。它与 `hop_port_count` 互斥，后者
+保留旧版推导 2–100 个端口的行为。请确保全部端口可达。跳跃在持续丢包后
+触发，仍使用 sing-box 的
+拨号器和 DNS 路由。`auto` 模式下，已有流量的 QUIC 救援通道若持续没有应用数据进展，
+还会将该流量交接至 TCP。`congestion` 默认为 `erasure`，`max_sessions`
+限制应用会话数。
 
-可同时设置 `server` 和 `server_port` 来覆盖配置文件中的连接地址，
-不会改变校验用的服务端身份。普通拨号字段应用于外层隧道和续期连接；
-QUIC 目标域名使用 sing-box 的 DNS 路由解析。
-
-当前不支持配置文件中的 UDP 端口跳跃。Queqiao 本身已复用连接，无需仅为
-连接复用再叠加一层 multiplex。设备注册与服务端管理仍由 `queqiaod` 完成。
+内联模式运行时无需其他文件，但证书到期前需要更新配置，无法自动持久化
+续期证书。旧的 `profile_path` 配置仍受支持并保留自动续期；它不能与内联
+身份字段同时使用。非零 `hop_port_count` 会覆盖档案中的数值。

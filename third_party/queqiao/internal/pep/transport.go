@@ -105,6 +105,7 @@ type udpHealth struct {
 type hopDialConfig struct {
 	portCount  int    // 0 or 1 = disabled; ≥2 = enabled
 	providerID string // for deterministic HopPorts derivation
+	ports      []int  // explicit additional ports; nil uses deterministic derivation
 	// walk is the client-wide port selection state, shared by all dials so
 	// each attempt continues where the previous one left off instead of
 	// restarting on the primary port.
@@ -788,9 +789,6 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 	var remoteAddr *net.UDPAddr
 	var packetConn net.PacketConn
 	if len(hostDialers) > 0 && hostDialers[0] != nil {
-		if hop.portCount >= 2 {
-			return nil, nil, errors.New("port hopping is not supported with a host dialer")
-		}
 		packetConn, remoteAddr, err = hostDialers[0].ListenPacket(dialCtx, remote)
 	} else {
 		remoteAddr, err = resolveUDPAddr(dialCtx, remote, resolver)
@@ -807,9 +805,11 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 		// is transparent to quic-go: outgoing packets are redirected to the
 		// active hop port and incoming packets appear to originate from the
 		// primary port.
-		rawUDP := packetConn.(*net.UDPConn)
 		ports := portmux.HopPorts(hop.providerID, remoteAddr.Port, hop.portCount)
-		mux := portmux.NewClientPortMux(rawUDP, remoteAddr, ports)
+		if len(hop.ports) > 0 {
+			ports = append([]int{remoteAddr.Port}, hop.ports...)
+		}
+		mux := portmux.NewClientPortMux(packetConn, remoteAddr, ports)
 		if hop.walk != nil {
 			// Start the dial on the next walked port rather than the
 			// primary: the primary is the port a blocker watches, and

@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -201,6 +202,104 @@ func TestNativeTCPHalfCloseAndUDPMultipleDestinations(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInlineIdentityAndPortHopping(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	reserve, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(reserve.LocalAddr().(*net.UDPAddr).Port)
+	reserve.Close()
+	providerPath, profilePath := testProfile(t, net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+	provider, err := Q.LoadProvider(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := Q.LoadClientProfile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPEM, err := os.ReadFile(filepath.Join(providerPath, "gateway-identity.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := make([]option.QueqiaoInboundUser, 0)
+	for _, account := range provider.Store.Accounts() {
+		for _, device := range provider.Store.Devices(account.ID) {
+			users = append(users, option.QueqiaoInboundUser{
+				Name: account.Name, DeviceName: device.Name,
+				AccountID: account.ID, DeviceID: device.ID,
+				PublicKey: device.PublicKey, MaxFlows: account.MaxFlows,
+				MaxClients: account.MaxClients, ExpiresAt: account.ExpiresAt,
+			})
+		}
+	}
+	rootPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: provider.RootCert.Raw}))
+	if err = os.RemoveAll(providerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(profilePath); err != nil {
+		t.Fatal(err)
+	}
+	logger := log.NewNOPFactory().NewLogger("test")
+	router := &recordingRouter{seen: make(chan adapter.InboundContext, 8)}
+	in, err := NewInbound(ctx, router, logger, "inline-in", option.QueqiaoInboundOptions{
+		ListenOptions: option.ListenOptions{ListenPort: port},
+		ProviderID:    provider.Metadata.ProviderID, GatewayID: provider.Metadata.GatewayID,
+		RootCertificate: rootPEM, GatewayCertificate: string(identityPEM),
+		GatewayPrivateKey: string(identityPEM), Users: users,
+		Transport: "quic", HopPortCount: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = in.(adapter.Lifecycle).Start(adapter.StartStateStart); err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := NewOutbound(ctx, nil, logger, "inline-out", option.QueqiaoOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: port},
+		ProviderID:    profile.ProviderID, GatewayID: profile.GatewayID,
+		RootCertificate: profile.RootCertificate, DeviceCertificate: profile.DeviceCertificate,
+		DevicePrivateKey: profile.DevicePrivateKey, Transport: "quic", HopPortCount: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.(*Outbound).Close()
+	connection, err := out.DialContext(ctx, "tcp", M.ParseSocksaddr("inline.example:443"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err = connection.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err = connection.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := io.ReadAll(connection)
+	connection.Close()
+	if err != nil || string(answer) != "reply:hello" {
+		t.Fatalf("inline TCP response = %q, %v", answer, err)
+	}
+	packets, err := out.ListenPacket(ctx, M.Socksaddr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packets.Close()
+	packets.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err = packets.WriteTo([]byte("udp"), M.ParseSocksaddr("inline.example:53")); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 32)
+	n, source, err := packets.ReadFrom(buffer)
+	if err != nil || source.String() != "inline.example:53" || string(buffer[:n]) != "udp" {
+		t.Fatalf("inline UDP response = %s %q, %v", source, buffer[:n], err)
 	}
 }
 
