@@ -31,7 +31,9 @@ inclusive ranges, matching the inbound; the primary `server_port` is also in
 the pool. It conflicts with `hop_port_count`, which retains the older
 deterministic 2–100-port behavior. All configured UDP ports must be reachable.
 Hopping reacts to sustained packet loss and retains the configured sing-box
-dialer and DNS routing. `congestion` defaults to
+dialer and DNS routing. In `auto` mode, an established data-bearing flow also
+hands off to TCP when a rescued QUIC lane stops making application progress.
+`congestion` defaults to
 `erasure`; `max_sessions` limits application flows.
 
 Inline mode needs no other runtime file. Certificates in the configuration

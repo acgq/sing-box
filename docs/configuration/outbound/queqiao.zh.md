@@ -28,7 +28,8 @@
 相同；主 `server_port` 也在端口池中。它与 `hop_port_count` 互斥，后者
 保留旧版推导 2–100 个端口的行为。请确保全部端口可达。跳跃在持续丢包后
 触发，仍使用 sing-box 的
-拨号器和 DNS 路由。`congestion` 默认为 `erasure`，`max_sessions`
+拨号器和 DNS 路由。`auto` 模式下，已有流量的 QUIC 救援通道若持续没有应用数据进展，
+还会将该流量交接至 TCP。`congestion` 默认为 `erasure`，`max_sessions`
 限制应用会话数。
 
 内联模式运行时无需其他文件，但证书到期前需要更新配置，无法自动持久化
