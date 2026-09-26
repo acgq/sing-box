@@ -1,13 +1,6 @@
 name: Publish Docker Images
 
 on:
-  #push:
-  #  branches:
-  #    - stable
-  #    - testing
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
       tag:
