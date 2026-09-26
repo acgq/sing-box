@@ -6,11 +6,11 @@
 可以用一条命令自动生成完整的服务端和客户端配置，无需手填 ID、证书或私钥：
 
 ```sh
-sing-box generate queqiao --server 203.0.113.1 \
+sing-box generate queqiao --server 203.0.113.1 --hop-ports 20000:20031 \
   --server-output queqiao-server.json --client-output queqiao-client.json
 ```
 
-默认签发有效期 10 年的网关和设备证书，启用 4 个 UDP 跳跃端口，并在客户端
+默认签发有效期 10 年的网关和设备证书；未设置 `--hop-ports` 时启用 4 个 UDP 跳跃端口，并在客户端
 本机 1080 端口建立 mixed 代理。可用 `--valid-years` 指定 1–10 年。
 现有服务器可加 `--server-base /etc/sing-box/config.json`，保留其他配置，
 替换标签为 `queqiao-in` 的入站。输出文件在 Unix 上以 0600 权限创建，
@@ -38,7 +38,7 @@ sing-box generate queqiao --server 203.0.113.1 \
   ],
   "transport": "auto",
   "congestion": "erasure",
-  "hop_port_count": 4
+  "hop_ports": ["20000:20031"]
 }
 ```
 
@@ -49,10 +49,13 @@ sing-box generate queqiao --server 203.0.113.1 \
 删除用户并重载配置即可撤销授权。配置包含网关私钥，须限制文件权限。
 
 `transport` 可为 `auto`（默认，同时监听 TCP 和 UDP）、`quic` 或 `tcp`。
-`hop_port_count` 为 0 或 1 时关闭跳跃，2–100 时启用 Queqiao 原生的
-响应式 UDP 端口跳跃。客户端与服务端必须使用相同数值；双方根据服务商 ID
-和主端口派生相同的附加端口。请在主机和云防火墙开放全部派生 UDP 端口。
-附加端口沿用 sing-box 的监听设置。TCP 回退仍使用主端口。
+`hop_ports` 可填写明确的 UDP 端口或包含两端的区间，例如
+`["20000:20031"]`。主 `listen_port` 始终也在 QUIC 端口池中；客户端须填写
+相同区间。附加端口最多 99 个，因为服务端为每个端口打开一个 UDP 套接字。
+请在主机和云防火墙开放主端口及整个区间。附加端口沿用 sing-box 的监听设置，
+TCP 回退仍使用主端口。`hop_ports` 与 `hop_port_count` 互斥；后者保留旧版
+根据服务商 ID 和主端口推导 2–100 个端口的行为。两种方式都是 Queqiao
+原生的丢包触发跳跃，而非按固定时间间隔跳跃。
 
 `max_sessions` 限制应用会话数；零采用核心默认值。`congestion` 默认为
 `erasure`。已认证的 TCP/UDP 流量交由 sing-box 路由，账号 ID 作为

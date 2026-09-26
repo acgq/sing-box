@@ -48,6 +48,9 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	if options.HopPortCount < 0 || options.HopPortCount > 100 {
 		return nil, errors.New("hop_port_count must be between 0 and 100")
 	}
+	if len(options.HopPorts) > 0 && options.HopPortCount != 0 {
+		return nil, errors.New("hop_ports and hop_port_count are mutually exclusive")
+	}
 	var profile Q.ClientProfile
 	var credentials Q.ClientCredentials
 	var remote string
@@ -69,7 +72,7 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 			return nil, err
 		}
 		remote = profile.Endpoint
-		if hopPortCount == 0 {
+		if hopPortCount == 0 && len(options.HopPorts) == 0 {
 			hopPortCount = profile.HopPortCount
 		}
 	} else {
@@ -95,6 +98,10 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		return nil, errors.New("missing Queqiao server and server_port")
 	}
 	destination := M.ParseSocksaddr(remote)
+	hopPorts, err := parseHopPorts(options.HopPorts, destination.Port)
+	if err != nil {
+		return nil, err
+	}
 	transport := options.Transport
 	if transport == "" {
 		transport = "auto"
@@ -111,7 +118,7 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		}
 	}
 	hostDialer := &outerDialer{d, service.FromContext[adapter.DNSRouter](ctx), query}
-	engine, err := Q.NewClient(Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, HopPortCount: hopPortCount, OuterDialer: hostDialer, Logger: newLogger(logger)})
+	engine, err := Q.NewClient(Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, HopPortCount: hopPortCount, HopPorts: hopPorts, OuterDialer: hostDialer, Logger: newLogger(logger)})
 	if err != nil {
 		return nil, err
 	}

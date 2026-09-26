@@ -8,12 +8,12 @@ Generate a complete server/client configuration pair without entering IDs,
 certificates, or keys by hand:
 
 ```sh
-sing-box generate queqiao --server 203.0.113.1 \
+sing-box generate queqiao --server 203.0.113.1 --hop-ports 20000:20031 \
   --server-output queqiao-server.json --client-output queqiao-client.json
 ```
 
 The generator defaults to 10-year gateway and device certificates, four UDP
-hop ports, and a local mixed client proxy on port 1080. Use `--valid-years`
+hop ports when `--hop-ports` is omitted, and a local mixed client proxy on port 1080. Use `--valid-years`
 to select 1–10 years. On an existing server, pass
 `--server-base /etc/sing-box/config.json` to preserve its other settings and
 replace the `queqiao-in` inbound. Both output files are created with mode 0600
@@ -43,7 +43,7 @@ the device private key.
   ],
   "transport": "auto",
   "congestion": "erasure",
-  "hop_port_count": 4
+  "hop_ports": ["20000:20031"]
 }
 ```
 
@@ -57,12 +57,16 @@ revokes that device. Protect the sing-box configuration because it contains the
 gateway private key.
 
 `transport` is `auto` (default, listen on TCP and UDP), `quic`, or `tcp`.
-`hop_port_count` is 0 or 1 to disable hopping, or 2–100 to enable Queqiao's
-native reactive UDP port hopping. The client and server must use the same count.
-Both sides derive the secondary UDP ports from the provider ID and primary
-port; open every derived port in host and cloud firewalls. The server binds
-those ports with the same sing-box listen settings. TCP remains on the primary
-port for fallback.
+`hop_ports` lists explicit UDP ports or inclusive ranges such as
+`["20000:20031"]`. The primary `listen_port` is also in the QUIC pool, even
+when it is outside the range. The client must configure the same range. Up to
+99 additional ports are accepted because the server opens one UDP socket per
+port. Open the primary and range in host and cloud firewalls. The server binds
+them with the same sing-box listen settings. TCP fallback remains on the
+primary port. `hop_ports` conflicts with `hop_port_count`; the latter remains
+available for older configurations and deterministically derives 2–100 ports
+from the provider ID and primary port. Both modes use Queqiao's native
+reactive hopping rather than a fixed timer.
 
 `max_sessions` limits application flows; zero selects the core default.
 `congestion` defaults to `erasure`. Authenticated TCP and UDP flows are sent

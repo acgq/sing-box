@@ -16,7 +16,7 @@ v0.6.3. Build sing-box with `with_quic`.
   "device_private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
   "transport": "auto",
   "congestion": "erasure",
-  "hop_port_count": 4
+  "hop_ports": ["20000:20031"]
 }
 ```
 
@@ -26,11 +26,12 @@ verified on every connection. Keep the device private key in a restricted
 sing-box configuration. `server` and `server_port` are required in inline mode.
 
 `transport` is `auto` (default, pooled QUIC with authenticated TLS/TCP
-fallback), `quic`, or `tcp`. `hop_port_count` is 0 or 1 to disable hopping,
-or 2–100 to enable Queqiao's native reactive UDP port hopping. It must match
-the inbound's count. Both sides derive the same ports from the provider ID
-and primary port; all derived UDP ports must be reachable. Hopping retains
-the configured sing-box dialer and DNS routing. `congestion` defaults to
+fallback), `quic`, or `tcp`. `hop_ports` accepts explicit UDP ports and
+inclusive ranges, matching the inbound; the primary `server_port` is also in
+the pool. It conflicts with `hop_port_count`, which retains the older
+deterministic 2–100-port behavior. All configured UDP ports must be reachable.
+Hopping reacts to sustained packet loss and retains the configured sing-box
+dialer and DNS routing. `congestion` defaults to
 `erasure`; `max_sessions` limits application flows.
 
 Inline mode needs no other runtime file. Certificates in the configuration

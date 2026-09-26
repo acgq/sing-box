@@ -19,14 +19,15 @@ var generateQueqiaoFlags struct {
 	server, listen, providerName, accountName, deviceName string
 	serverBase, serverOutput, clientOutput, inboundTag    string
 	port, clientListenPort, hopPortCount, validYears      int
+	hopPorts                                              []string
 }
 
 var commandGenerateQueqiao = &cobra.Command{
 	Use:   "queqiao",
 	Short: "Generate self-contained Queqiao server and client configurations",
 	Args:  cobra.NoArgs,
-	RunE: func(_ *cobra.Command, _ []string) error {
-		return generateQueqiaoConfigs()
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return generateQueqiaoConfigs(cmd.Flags().Changed("hop-port-count"))
 	},
 }
 
@@ -40,6 +41,7 @@ func init() {
 	f.StringVar(&generateQueqiaoFlags.deviceName, "device-name", "device", "First device name")
 	f.IntVar(&generateQueqiaoFlags.validYears, "valid-years", 10, "Certificate validity in calendar years (1-10)")
 	f.IntVar(&generateQueqiaoFlags.hopPortCount, "hop-port-count", 4, "Number of Queqiao UDP hop ports (0-100)")
+	f.StringSliceVar(&generateQueqiaoFlags.hopPorts, "hop-ports", nil, "Explicit UDP ports or ranges, e.g. 20000:20031 (replaces hop-port-count)")
 	f.IntVar(&generateQueqiaoFlags.clientListenPort, "client-listen-port", 1080, "Client mixed proxy listen port")
 	f.StringVar(&generateQueqiaoFlags.inboundTag, "inbound-tag", "queqiao-in", "Server inbound tag to add or replace")
 	f.StringVar(&generateQueqiaoFlags.serverBase, "server-base", "", "Existing server JSON config to preserve other services and replace the tagged Queqiao inbound")
@@ -48,7 +50,7 @@ func init() {
 	commandGenerate.AddCommand(commandGenerateQueqiao)
 }
 
-func generateQueqiaoConfigs() error {
+func generateQueqiaoConfigs(explicitCount bool) error {
 	f := generateQueqiaoFlags
 	if f.server == "" || f.server != strings.TrimSpace(f.server) || strings.ContainsAny(f.server, " \t\r\n") {
 		return errors.New("--server must be a public IP address or domain")
@@ -58,6 +60,9 @@ func generateQueqiaoConfigs() error {
 	}
 	if f.hopPortCount < 0 || f.hopPortCount > 100 {
 		return errors.New("--hop-port-count must be between 0 and 100")
+	}
+	if len(f.hopPorts) > 0 && explicitCount {
+		return errors.New("--hop-ports and --hop-port-count are mutually exclusive")
 	}
 	if f.inboundTag == "" || f.serverOutput == "" || f.clientOutput == "" || filepath.Clean(f.serverOutput) == filepath.Clean(f.clientOutput) {
 		return errors.New("inbound tag and distinct output paths are required")
@@ -85,7 +90,12 @@ func generateQueqiaoConfigs() error {
 			"account_id": bundle.AccountID, "device_id": bundle.DeviceID,
 			"public_key": bundle.DevicePublicKey,
 		}},
-		"transport": "auto", "hop_port_count": f.hopPortCount,
+		"transport": "auto",
+	}
+	if len(f.hopPorts) > 0 {
+		serverInbound["hop_ports"] = f.hopPorts
+	} else {
+		serverInbound["hop_port_count"] = f.hopPortCount
 	}
 	server, err := queqiaoServerConfig(f.serverBase, f.inboundTag, serverInbound)
 	if err != nil {
@@ -101,8 +111,13 @@ func generateQueqiaoConfigs() error {
 			"root_certificate":   bundle.RootCertificate,
 			"device_certificate": bundle.DeviceCertificate,
 			"device_private_key": bundle.DevicePrivateKey,
-			"transport":          "auto", "hop_port_count": f.hopPortCount,
+			"transport":          "auto",
 		}},
+	}
+	if len(f.hopPorts) > 0 {
+		client["outbounds"].([]map[string]any)[0]["hop_ports"] = f.hopPorts
+	} else {
+		client["outbounds"].([]map[string]any)[0]["hop_port_count"] = f.hopPortCount
 	}
 	serverBytes, err := json.MarshalIndent(server, "", "  ")
 	if err != nil {

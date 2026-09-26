@@ -79,6 +79,9 @@ type ServerConfig struct {
 	// route responses back through whichever port each client most recently
 	// used.
 	HopPortCount int
+	// HopPorts is an explicit list of additional UDP ports. It replaces
+	// HopPortCount when configured; the primary ListenAddr port remains in the pool.
+	HopPorts []int
 	// testLaneWriteHook is intentionally unexported and nil in production. It
 	// lets package integration tests reproduce loss of a specific logical
 	// frame without depending on encrypted QUIC packet layout.
@@ -521,7 +524,7 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 }
 
 func (s *Server) serveQUIC(ctx context.Context) error {
-	if s.cfg.HopPortCount < 2 {
+	if s.cfg.HopPortCount < 2 && len(s.cfg.HopPorts) == 0 {
 		// Fast path: single port, no mux overhead.
 		packetConn, err := net.ListenPacket("udp", s.cfg.ListenAddr)
 		if err != nil {
@@ -541,7 +544,7 @@ func (s *Server) serveQUIC(ctx context.Context) error {
 		return fmt.Errorf("listen on remote QUIC address: %w", err)
 	}
 	primaryPort := primaryConn.LocalAddr().(*net.UDPAddr).Port
-	ports := portmux.HopPorts(s.cfg.Credentials.ProviderID, primaryPort, s.cfg.HopPortCount)
+	ports := s.hopPorts(primaryPort)
 	mux, err := portmux.NewServerPortMux(primaryConn, ports)
 	if err != nil {
 		_ = primaryConn.Close()

@@ -41,6 +41,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if options.HopPortCount < 0 || options.HopPortCount > 100 {
 		return nil, errors.New("hop_port_count must be between 0 and 100")
 	}
+	if len(options.HopPorts) > 0 && options.HopPortCount != 0 {
+		return nil, errors.New("hop_ports and hop_port_count are mutually exclusive")
+	}
+	hopPorts, err := parseHopPorts(options.HopPorts, options.ListenPort)
+	if err != nil {
+		return nil, err
+	}
 	var provider *Q.Provider
 	var credentials Q.ServerCredentials
 	var enrollment *Q.EnrollmentService
@@ -76,7 +83,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	runCtx, cancel := context.WithCancel(ctx)
 	i := &Inbound{Adapter: inbound.NewAdapter(Type, tag), ctx: runCtx, cancel: cancel, router: router, logger: logger, tcp: tcp, udp: udp, listenOptions: options.ListenOptions}
 	i.listener = listener.New(listener.Options{Context: runCtx, Logger: logger, Listen: options.ListenOptions})
-	server, err := Q.NewServer(Q.ServerConfig{ListenAddr: ":0", Credentials: credentials, Enrollment: enrollment, EnableTCP: tcp, EnableQUIC: udp, Congestion: Q.CongestionControlKind(options.Congestion), MaxSessions: options.MaxSessions, HopPortCount: options.HopPortCount, DialDestination: i.dialDestination, ListenDestinationPacket: i.listenDestinationPacket, Logger: newLogger(logger)})
+	server, err := Q.NewServer(Q.ServerConfig{ListenAddr: ":0", Credentials: credentials, Enrollment: enrollment, EnableTCP: tcp, EnableQUIC: udp, Congestion: Q.CongestionControlKind(options.Congestion), MaxSessions: options.MaxSessions, HopPortCount: options.HopPortCount, HopPorts: hopPorts, DialDestination: i.dialDestination, ListenDestinationPacket: i.listenDestinationPacket, Logger: newLogger(logger)})
 	if err != nil {
 		cancel()
 		return nil, err

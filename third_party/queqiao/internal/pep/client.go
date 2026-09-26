@@ -199,7 +199,10 @@ type ClientConfig struct {
 	// maintain a pool of that many ports derived from the provider ID and hop
 	// reactively when sustained zero-receive loss is detected.
 	HopPortCount int
-	Logger       *slog.Logger
+	// HopPorts is an explicit list of additional UDP ports. It replaces
+	// HopPortCount when configured; the primary RemoteAddr port remains in the pool.
+	HopPorts []int
+	Logger   *slog.Logger
 }
 
 type Client struct {
@@ -1155,15 +1158,20 @@ const transientUDPSendLogInterval = 5 * time.Second
 // which disables port hopping in dialQUICConnection. All dials share one
 // HopWalk so port selection persists across connection attempts.
 func (c *Client) hopDialConfig() hopDialConfig {
-	if c.cfg.HopPortCount < 2 {
+	count := c.cfg.HopPortCount
+	if len(c.cfg.HopPorts) > 0 {
+		count = len(c.cfg.HopPorts) + 1
+	}
+	if count < 2 {
 		return hopDialConfig{}
 	}
 	c.hopWalkOnce.Do(func() {
-		c.hopWalk = portmux.NewHopWalk(c.cfg.HopPortCount)
+		c.hopWalk = portmux.NewHopWalk(count)
 	})
 	return hopDialConfig{
-		portCount:  c.cfg.HopPortCount,
+		portCount:  count,
 		providerID: c.cfg.Credentials.ProviderID,
+		ports:      c.cfg.HopPorts,
 		walk:       c.hopWalk,
 		metrics:    c.cfg.Metrics,
 		logger:     c.cfg.Logger,

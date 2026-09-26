@@ -105,6 +105,7 @@ type udpHealth struct {
 type hopDialConfig struct {
 	portCount  int    // 0 or 1 = disabled; ≥2 = enabled
 	providerID string // for deterministic HopPorts derivation
+	ports      []int  // explicit additional ports; nil uses deterministic derivation
 	// walk is the client-wide port selection state, shared by all dials so
 	// each attempt continues where the previous one left off instead of
 	// restarting on the primary port.
@@ -805,6 +806,9 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 		// active hop port and incoming packets appear to originate from the
 		// primary port.
 		ports := portmux.HopPorts(hop.providerID, remoteAddr.Port, hop.portCount)
+		if len(hop.ports) > 0 {
+			ports = append([]int{remoteAddr.Port}, hop.ports...)
+		}
 		mux := portmux.NewClientPortMux(packetConn, remoteAddr, ports)
 		if hop.walk != nil {
 			// Start the dial on the next walked port rather than the

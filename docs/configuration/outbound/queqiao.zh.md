@@ -15,7 +15,7 @@
   "device_private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
   "transport": "auto",
   "congestion": "erasure",
-  "hop_port_count": 4
+  "hop_ports": ["20000:20031"]
 }
 ```
 
@@ -24,9 +24,10 @@
 内联模式必须设置 `server` 和 `server_port`。
 
 `transport` 可为 `auto`（默认，QUIC 连接池及 TLS/TCP 回退）、`quic`
-或 `tcp`。`hop_port_count` 为 0 或 1 时关闭跳跃，2–100 时启用原生的
-响应式 UDP 端口跳跃，必须与入站数值一致。双方根据服务商 ID 和主端口
-派生附加端口；需确保所有派生 UDP 端口可达。跳跃仍使用 sing-box 的
+或 `tcp`。`hop_ports` 可填写 UDP 端口和包含两端的区间，必须与入站设置
+相同；主 `server_port` 也在端口池中。它与 `hop_port_count` 互斥，后者
+保留旧版推导 2–100 个端口的行为。请确保全部端口可达。跳跃在持续丢包后
+触发，仍使用 sing-box 的
 拨号器和 DNS 路由。`congestion` 默认为 `erasure`，`max_sessions`
 限制应用会话数。
 
