@@ -44,6 +44,10 @@ func applyLowMemory(config *Q.ClientConfig) {
 		MaxFlowSendBytes: 1 << 20, MaxFlowReceiveBytes: 2 << 20,
 		MaxFlowOutstanding: 128, MaxFlowReceiveFrames: 128,
 		EventQueueFrames: 4, LaneWriteQueueFrames: 8, LaneInteractiveReserve: 2,
-		FrameReadBufferBytes: 4096, MaxUDPPacketBytes: 65535, MaxBulkConnections: 1,
+		// Each UDP association holds one read buffer of MaxUDPPacketBytes,
+		// so 65535 would retain 64 KiB per association. 4096 still covers
+		// EDNS0-sized DNS and any path-MTU datagram; larger local datagrams
+		// are truncated instead of relayed.
+		FrameReadBufferBytes: 4096, MaxUDPPacketBytes: 4096, MaxBulkConnections: 1,
 	}
 }
