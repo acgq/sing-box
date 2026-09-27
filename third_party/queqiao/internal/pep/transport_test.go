@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -108,7 +109,7 @@ func TestVanishedSourceAddressRemainsFatal(t *testing.T) {
 	}
 }
 
-func TestTransientRouteWrapperPreservesAndProtectsQUICFastPath(t *testing.T) {
+func TestTransientRouteWrapperRoutesQUICThroughTolerantWriteTo(t *testing.T) {
 	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		t.Fatal(err)
@@ -118,12 +119,25 @@ func TestTransientRouteWrapperPreservesAndProtectsQUICFastPath(t *testing.T) {
 	wrapped := tolerateTransientRouteErrors(&routeErrorOOBConn{UDPConn: udp, err: injectedRouteError}, func(error) {
 		observed++
 	})
-	oob, ok := wrapped.(quic.OOBCapablePacketConn)
-	if !ok {
-		t.Fatal("route-error wrapper disabled quic-go's OOBCapablePacketConn fast path")
+	// The wrapper must NOT satisfy quic.OOBCapablePacketConn: on Linux and
+	// macOS quic-go's oobConn sends through the raw descriptor with
+	// unix.SendmsgN and never calls the wrapper's WriteTo or WriteMsgUDP,
+	// which would leave the tolerance (and its observer) as dead code on
+	// exactly the platforms whose routes disappear. Withholding SyscallConn
+	// makes quic-go fall back to a basicConn, whose WritePacket routes
+	// through the tolerant WriteTo on every platform. The hop mux already
+	// pays this cost: a ClientPortMux is not an OOBCapablePacketConn either.
+	if _, ok := wrapped.(quic.OOBCapablePacketConn); ok {
+		t.Fatal("route-error wrapper exposed quic-go's OOBCapablePacketConn fast path, whose Linux send path bypasses the wrapper")
 	}
+	if _, ok := wrapped.(syscall.Conn); ok {
+		t.Fatal("route-error wrapper exposed SyscallConn, which would re-enable quic-go's oobConn fast path")
+	}
+	// Direct OOB consumers of the wrapper still get tolerant writes.
 	payload, control := []byte("packet"), []byte{1, 2, 3}
-	n, oobn, err := oob.WriteMsgUDP(payload, control, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+	n, oobn, err := wrapped.(interface {
+		WriteMsgUDP([]byte, []byte, *net.UDPAddr) (int, int, error)
+	}).WriteMsgUDP(payload, control, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
 	if err != nil || n != len(payload) || oobn != len(control) {
 		t.Fatalf("transient OOB write = %d/%d, %v; want %d/%d, nil", n, oobn, err, len(payload), len(control))
 	}

@@ -691,10 +691,24 @@ func (c *transientRoutePacketConn) WriteTo(payload []byte, addr net.Addr) (int, 
 	return len(payload), nil
 }
 
-// transientRouteOOBPacketConn preserves quic-go's UDP fast path. Hiding
-// ReadMsgUDP / WriteMsgUDP behind a plain net.PacketConn would disable ECN,
-// batched I/O and GSO on Linux, turning a resilience fix into a throughput
-// regression.
+// transientRouteOOBPacketConn forwards the packet methods that other
+// wrappers (and x/net's OOB adapter) may still reach through net.Conn or
+// WriteMsgUDP, but it deliberately does NOT implement SyscallConn.
+//
+// quic-go's rawConn selection on Linux and macOS wraps an
+// OOBCapablePacketConn in an oobConn whose WritePacket sends through the raw
+// descriptor with unix.SendmsgN. That path never calls WriteTo or
+// WriteMsgUDP on this wrapper, so the transient-route tolerance above — and
+// the observe hook behind it — would be dead code exactly on the platforms
+// whose routes actually disappear (verified against quic-go v0.61.0-sing-box
+// sys_conn_oob.go). Windows always uses a basicConn over WriteTo. Withholding
+// SyscallConn makes quic-go fall back to a basicConn on every platform, so
+// all packet writes pass through the tolerant WriteTo. The cost is losing
+// ECN, batched reads and GSO on the un-hopped client socket — the hop mux
+// already pays it, since a ClientPortMux is not an OOBCapablePacketConn
+// either. Resilience outranks throughput here: ENOBUFS alone is routine on
+// gigabit routers, and one unswallowed such error kills every stream
+// multiplexed on the connection.
 type transientRouteOOBPacketConn struct {
 	*transientRoutePacketConn
 	oob    quic.OOBCapablePacketConn
@@ -714,10 +728,6 @@ func (c *transientRouteOOBPacketConn) Write(payload []byte) (int, error) {
 
 func (c *transientRouteOOBPacketConn) RemoteAddr() net.Addr {
 	return c.stream.RemoteAddr()
-}
-
-func (c *transientRouteOOBPacketConn) SyscallConn() (syscall.RawConn, error) {
-	return c.oob.SyscallConn()
 }
 
 func (c *transientRouteOOBPacketConn) SetReadBuffer(bytes int) error {
