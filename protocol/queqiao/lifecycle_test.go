@@ -95,6 +95,10 @@ func (*forwardingTestRouter) RouteConnectionEx(ctx context.Context, conn net.Con
 }
 
 func newLifecycleOutbound(t *testing.T, transport string, router adapter.Router, lowMemory ...bool) *Outbound {
+	return newLifecycleOutboundDelayed(t, transport, router, 0, lowMemory...)
+}
+
+func newLifecycleOutboundDelayed(t *testing.T, transport string, router adapter.Router, delay time.Duration, lowMemory ...bool) *Outbound {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
@@ -116,6 +120,9 @@ func newLifecycleOutbound(t *testing.T, transport string, router adapter.Router,
 		endpoint = tcp.Addr().String()
 		port = uint16(tcp.Addr().(*net.TCPAddr).Port)
 		tcp.Close()
+	}
+	if delay > 0 && transport == "quic" {
+		endpoint = delayedUDPProxy(t, endpoint, delay)
 	}
 	provider, profile := testProfile(t, endpoint)
 	logger := log.NewNOPFactory().NewLogger("test")

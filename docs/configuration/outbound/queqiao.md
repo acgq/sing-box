@@ -44,6 +44,9 @@ queues and QUIC receive windows, and uses one bulk QUIC connection. The default
 session limit in this mode is 128; an explicit `max_sessions` still takes precedence.
 These are protocol buffer limits, not a limit on whole-process RSS. Smaller
 windows may reduce throughput on high-bandwidth, high-latency connections.
+QUIC stream windows start at 1 MiB and can grow to 4 MiB; the connection
+window starts at 4 MiB and can grow to 8 MiB as data is consumed. These bounds
+apply per QUIC connection and are separate from the shared payload budgets.
 
 Inline mode needs no other runtime file. Certificates in the configuration
 must be replaced before expiry; automatic renewal cannot persist an inline

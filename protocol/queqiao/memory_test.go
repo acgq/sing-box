@@ -35,6 +35,12 @@ func TestLowMemorySelection(t *testing.T) {
 	if config.MaxSessions != 42 {
 		t.Fatal("explicit session limit overwritten")
 	}
+	if config.MaxStreamReceiveWindow <= config.StreamReceiveWindow || config.MaxConnectionReceiveWindow <= config.ConnectionReceiveWindow {
+		t.Fatal("low-memory windows cannot adapt to a higher bandwidth-delay product")
+	}
+	if config.MaxStreamReceiveWindow > config.MaxConnectionReceiveWindow || config.MaxConnectionReceiveWindow > 8<<20 {
+		t.Fatal("low-memory QUIC connection cap exceeded")
+	}
 }
 
 func TestLowMemoryConcurrentFlowsReleaseBudgets(t *testing.T) {

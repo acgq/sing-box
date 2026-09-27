@@ -36,8 +36,11 @@ func applyLowMemory(config *Q.ClientConfig) {
 		config.MaxSessions = 128
 	}
 	config.MaxPendingOpens = 32
-	config.StreamReceiveWindow, config.MaxStreamReceiveWindow = 1<<20, 1<<20
-	config.ConnectionReceiveWindow, config.MaxConnectionReceiveWindow = 4<<20, 4<<20
+	// Start small, but allow bounded window growth as the receiver drains data.
+	// A fixed 1 MiB stream window caps a 60 ms path at roughly 140 Mbit/s
+	// even before window-update timing and protocol overhead are considered.
+	config.StreamReceiveWindow, config.MaxStreamReceiveWindow = 1<<20, 4<<20
+	config.ConnectionReceiveWindow, config.MaxConnectionReceiveWindow = 4<<20, 8<<20
 	config.MaxIncomingStreams = 128
 	config.MemoryLimits = &Q.MemoryLimits{
 		SendBudgetBytes: 4 << 20, ReceiveBudgetBytes: 8 << 20,
