@@ -118,7 +118,11 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		}
 	}
 	hostDialer := &outerDialer{d, service.FromContext[adapter.DNSRouter](ctx), query}
-	engine, err := Q.NewClient(Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, HopPortCount: hopPortCount, HopPorts: hopPorts, OuterDialer: hostDialer, Logger: newLogger(logger)})
+	clientConfig := Q.ClientConfig{RemoteAddr: remote, Credentials: credentials, Transport: Q.TransportKind(transport), Congestion: Q.CongestionControlKind(options.Congestion), EnableQUICPool: true, MaxSessions: options.MaxSessions, HopPortCount: hopPortCount, HopPorts: hopPorts, OuterDialer: hostDialer, Logger: newLogger(logger)}
+	if useLowMemory(options.LowMemory) {
+		applyLowMemory(&clientConfig)
+	}
+	engine, err := Q.NewClient(clientConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +200,20 @@ func (o *Outbound) begin(ctx context.Context) (context.Context, func(), error) {
 	o.wg.Add(1)
 	return child, func() { stop(); cancel(); o.wg.Done() }, nil
 }
+
+// A dial context bounds establishment only. HTTP transports may cancel it
+// after a request, while the resulting connection still serves other requests.
+// Keep its values, but tie the established flow to the outbound's lifetime.
+func (o *Outbound) beginDial(ctx context.Context) (context.Context, func(), func() bool, error) {
+	child, finish, err := o.begin(context.WithoutCancel(ctx))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	runCtx, cancel := context.WithCancel(child)
+	stopDial := context.AfterFunc(ctx, cancel)
+	return runCtx, func() { stopDial(); cancel(); finish() }, stopDial, nil
+}
+
 func (o *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if N.NetworkName(network) == N.NetworkUDP {
 		c, e := o.ListenPacket(ctx, destination)
@@ -207,10 +225,11 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 	if N.NetworkName(network) != N.NetworkTCP {
 		return nil, errors.New("unsupported network")
 	}
-	child, finish, err := o.begin(ctx)
+	child, finish, stopDial, err := o.beginDial(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer stopDial()
 	local, engine := newStreamPipe()
 	ready := make(chan error, 1)
 	stop := context.AfterFunc(child, func() { _ = engine.Close() })
@@ -221,6 +240,9 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 	}()
 	select {
 	case err = <-ready:
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			local.Close()
 			return nil, err
@@ -228,14 +250,18 @@ func (o *Outbound) DialContext(ctx context.Context, network string, destination 
 		return local, nil
 	case <-child.Done():
 		local.Close()
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, child.Err()
 	}
 }
 func (o *Outbound) ListenPacket(ctx context.Context, _ M.Socksaddr) (net.PacketConn, error) {
-	child, finish, err := o.begin(ctx)
+	child, finish, stopDial, err := o.beginDial(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer stopDial()
 	local, engine := newPacketPipe()
 	ready := make(chan error, 1)
 	runCtx, cancel := context.WithCancel(child)
@@ -248,6 +274,9 @@ func (o *Outbound) ListenPacket(ctx context.Context, _ M.Socksaddr) (net.PacketC
 	}()
 	select {
 	case err = <-ready:
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			cancel()
 			local.Close()
@@ -257,6 +286,9 @@ func (o *Outbound) ListenPacket(ctx context.Context, _ M.Socksaddr) (net.PacketC
 	case <-child.Done():
 		cancel()
 		local.Close()
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, child.Err()
 	}
 }

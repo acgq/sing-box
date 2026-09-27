@@ -2195,11 +2195,18 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 				lastRecoveryAttempt = time.Time{}
 			}
 			if watchRescueProgress {
+				// Once transport delivery catches up, silence is application
+				// idleness, not evidence that the rescued QUIC path failed.
+				// A future stall starts a fresh observation window.
+				if !flow.pendingOutbound() {
+					watchRescueProgress = false
+					lastRescueProgress = now
+				}
 				if snapshot.Bytes > lastRescueBytes {
 					lastRescueBytes = snapshot.Bytes
 					lastRescueProgress = now
 				}
-				if c.cfg.Transport == TransportAuto && !hasTCPLane(flow) && snapshot.Bytes >= stalledRecoveryMinBytes &&
+				if watchRescueProgress && c.cfg.Transport == TransportAuto && !hasTCPLane(flow) && snapshot.Bytes >= stalledRecoveryMinBytes &&
 					!flow.doneChanClosed() && now.Sub(lastRescueProgress) >= stalledRecoveryTCPGrace &&
 					!now.Before(nextTCPHandoff) {
 					// A QUIC JOIN may authenticate while bulk data remains

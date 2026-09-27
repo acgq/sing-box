@@ -427,11 +427,55 @@ func TestALPNFailureExplainsEndpointOrVersionMismatch(t *testing.T) {
 	}
 	err := explainDataHandshakeError("gateway.example:443", "TCP", errors.New("remote error: tls: no application protocol"))
 	message := err.Error()
-	if !strings.Contains(message, "protocol 1") || !strings.Contains(message, "gateway.example:443") || !strings.Contains(message, "incompatible") {
+	if !strings.Contains(message, "protocol 1") || !strings.Contains(message, "gateway.example:443") || !strings.Contains(message, "incompatible") || !strings.Contains(message, "intermediary") {
 		t.Fatalf("unhelpful ALPN error: %v", err)
 	}
 	original := errors.New("connection refused")
 	if got := explainDataHandshakeError("gateway.example:443", "TCP", original); got != original {
 		t.Fatalf("non-ALPN error was replaced: %v", got)
+	}
+}
+
+func TestQUICVersionPreferenceAndV1Compatibility(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		versions []quic.Version
+		want     quic.Version
+	}{
+		{"modern", []quic.Version{quic.Version1, quic.Version2}, quic.Version2},
+		{"v1-only", []quic.Version{quic.Version1}, quic.Version1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			serverCredentials, clientCredentials := testCertificate(t)
+			serverTLS, err := identity.ServerTLSConfig(serverCredentials, defaultALPN, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverConfig := quicServerConfig(flowWindows{})
+			serverConfig.Versions = test.versions
+			listener, err := quic.ListenAddr("127.0.0.1:0", serverTLS, serverConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, packet, err := dialQUICConnection(ctx, listener.Addr().String(), clientCredentials, 4*time.Second, "", nil, nil, flowWindows{}, hopDialConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer packet.Close()
+			defer conn.CloseWithError(0, "test complete")
+			peer, err := listener.Accept(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if conn.ConnectionState().Version != test.want || peer.ConnectionState().Version != test.want {
+				t.Fatalf("negotiated versions: client=%v server=%v, want %v", conn.ConnectionState().Version, peer.ConnectionState().Version, test.want)
+			}
+			if conn.ConnectionState().TLS.NegotiatedProtocol != defaultALPN {
+				t.Fatal("ALPN changed")
+			}
+		})
 	}
 }

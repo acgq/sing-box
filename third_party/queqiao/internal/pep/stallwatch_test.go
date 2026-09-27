@@ -86,29 +86,25 @@ func TestScanStallGating(t *testing.T) {
 	}
 }
 
-// The response gate opens when the application sent something the peer has
-// not answered, and closes on any downstream payload or either close. A flow
-// whose last send was answered is idle, not waiting.
-func TestResponseOutstandingGating(t *testing.T) {
+// HTTP/2 control frames and one-way application traffic need no reply. Once
+// transport-acknowledged, silence is not evidence of a broken QUIC lane.
+func TestStallWatchdogDoesNotRescueAcknowledgedApplicationSilence(t *testing.T) {
 	flow := newStallTestFlow(t, nil)
-	if flow.responseOutstanding() {
-		t.Fatal("a flow that never sent is waiting on a response")
-	}
 	flow.observe(64, true)
 	flow.bytesUp.Add(64)
-	if !flow.responseOutstanding() {
-		t.Fatal("an unanswered request did not open the response gate")
+	flow.noteSent(0, 64)
+	if err := flow.acknowledgeReplay(64, false); err != nil {
+		t.Fatal(err)
 	}
-	flow.observe(128, false)
-	flow.bytesDown.Add(128)
-	if flow.responseOutstanding() {
-		t.Fatal("an answered request kept the response gate open")
-	}
-	flow.observe(64, true)
-	flow.bytesUp.Add(64)
-	flow.remoteFinSeen.Store(true)
-	if flow.responseOutstanding() {
-		t.Fatal("a flow that saw the peer's FIN is still waiting")
+	flow.stallScan = 5 * time.Millisecond
+	flow.stallGrace = 20 * time.Millisecond
+	stop := make(chan struct{})
+	defer close(stop)
+	go flow.stallWatchdog(stop)
+	select {
+	case <-flow.stallSignals():
+		t.Fatal("acknowledged application traffic triggered lane rescue")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

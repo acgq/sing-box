@@ -6,6 +6,11 @@ on:
   push:
     branches: [stable]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing Queqiao release to replace, e.g. v1.14.2.04 (empty creates a new release)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,8 +31,19 @@ jobs:
       - name: Set package version
         id: version
         shell: bash
+        env:
+          REPLACE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ -n "$REPLACE_TAG" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/stable ]]
+            [[ "$REPLACE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            title=$(gh release view "$REPLACE_TAG" --json name --jq .name)
+            [[ "$title" == *Queqiao* ]]
+            echo "package=${REPLACE_TAG#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Ignore tags created by this workflow; use the latest upstream
           # three-part version as the base for each new stable build.
           tag=$(git tag --merged HEAD --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
@@ -37,8 +53,20 @@ jobs:
           version="${tag#v}.0${GITHUB_RUN_NUMBER}"
           echo "package=$version" >> "$GITHUB_OUTPUT"
 
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test Queqiao lifecycle, memory and transport
+        run: |
+          go test -race ./protocol/queqiao ./third_party/queqiao/internal/portmux -count=1 -timeout 180s
+          go test -short ./third_party/queqiao/internal/pep -count=1 -timeout 180s
+
   build:
-    needs: version
+    needs: [version, test]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -110,16 +138,22 @@ jobs:
             .github/build_openwrt_apk.sh "$arch" "$VERSION" dist/sing-box \
               "dist/sing-box_${VERSION}_openwrt_${arch}.apk"
           done
-      - name: Name Windows executable
+      - name: Package Windows executable and ZIP
         if: matrix.os == 'windows'
         shell: bash
-        run: mv dist/sing-box.exe "dist/sing-box_${VERSION}_windows_amd64.exe"
+        run: |
+          set -euo pipefail
+          mv dist/sing-box.exe "dist/sing-box_${VERSION}_windows_amd64.exe"
+          mkdir -p windows-package
+          cp "dist/sing-box_${VERSION}_windows_amd64.exe" windows-package/sing-box.exe
+          cp LICENSE windows-package/LICENSE
+          (cd windows-package && zip -9 "../dist/sing-box_${VERSION}_windows_amd64.zip" sing-box.exe LICENSE)
       - name: Write checksums
         shell: bash
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.deb' -o -name '*.ipk' -o -name '*.apk' -o -name '*.exe' \) \
+          find . -maxdepth 1 -type f \( -name '*.deb' -o -name '*.ipk' -o -name '*.apk' -o -name '*.exe' -o -name '*.zip' \) \
             -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -129,14 +163,35 @@ jobs:
             dist/*.ipk
             dist/*.apk
             dist/*.exe
+            dist/*.zip
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
+  windows-smoke:
+    needs: [version, build]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sing-box-windows-amd64
+          path: dist
+      - name: Verify Windows ZIP and executable
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.package }}
+        run: |
+          Expand-Archive "dist/sing-box_${env:VERSION}_windows_amd64.zip" extracted
+          $packaged = (Get-FileHash extracted/sing-box.exe).Hash
+          $standalone = (Get-FileHash "dist/sing-box_${env:VERSION}_windows_amd64.exe").Hash
+          if ($packaged -ne $standalone) { throw 'ZIP executable differs from standalone asset' }
+          & ./extracted/sing-box.exe version
+          if ($LASTEXITCODE -ne 0) { throw 'Windows executable failed to start' }
+
   publish:
     name: Publish packages to Release
     if: github.ref == 'refs/heads/stable'
-    needs: [version, build]
+    needs: [version, build, windows-smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -151,28 +206,34 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          packages=(dist/*.deb dist/*.ipk dist/*.apk dist/*.exe)
-          if [[ ${#packages[@]} -ne 11 ]]; then
-            printf 'Expected 11 packages, found %s\n' "${#packages[@]}" >&2
+          packages=(dist/*.deb dist/*.ipk dist/*.apk dist/*.exe dist/*.zip)
+          if [[ ${#packages[@]} -ne 12 ]]; then
+            printf 'Expected 12 packages, found %s\n' "${#packages[@]}" >&2
             exit 1
           fi
           rm -f dist/SHA256SUMS
-          (cd dist && sha256sum -- *.deb *.ipk *.apk *.exe > SHA256SUMS)
+          (cd dist && sha256sum -- *.deb *.ipk *.apk *.exe *.zip > SHA256SUMS)
       - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.package }}
+          REPLACE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           tag="v${VERSION}"
+          printf 'Debian amd64/arm64, Windows amd64 EXE/ZIP, and OpenWrt aarch64 IPK/APK packages with Queqiao. Packages are unsigned.\n\nSource commit: %s\nBuild: https://github.com/%s/actions/runs/%s\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > release-notes.md
           if gh release view "$tag" >/dev/null 2>&1; then
+            if [[ -n "$REPLACE_TAG" ]]; then
+              gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true
+            fi
             gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --notes-file release-notes.md --latest
           else
             gh release create "$tag" dist/* \
               --target "$GITHUB_SHA" \
               --latest \
               --title "sing-box ${VERSION} (Queqiao)" \
-              --notes 'Debian amd64/arm64, Windows amd64, and OpenWrt aarch64 IPK/APK packages with Queqiao. Packages are unsigned.'
+              --notes-file release-notes.md
           fi

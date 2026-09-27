@@ -14,6 +14,7 @@ type QueqiaoOutboundOptions struct {
 	Transport         string                     `json:"transport,omitempty"`
 	Congestion        string                     `json:"congestion,omitempty"`
 	MaxSessions       int                        `json:"max_sessions,omitempty"`
+	LowMemory         *bool                      `json:"low_memory,omitempty"`
 	HopPortCount      int                        `json:"hop_port_count,omitempty"`
 	HopPorts          badoption.Listable[string] `json:"hop_ports,omitempty"`
 }

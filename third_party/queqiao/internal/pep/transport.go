@@ -590,6 +590,11 @@ func (w flowWindows) validate() error {
 func quicConfig(windows flowWindows) *quic.Config {
 	streamWindow, connectionWindow, streamMax, connectionMax, incomingStreams := windows.resolved()
 	return &quic.Config{
+		// Prefer v2: some paths terminate/re-originate v1 Initials as HTTP/3,
+		// replacing queqiao/1 with h3 before the gateway sees the ClientHello.
+		// Keep v1 for version negotiation with older peers; authentication and
+		// the Queqiao ALPN remain identical on both versions.
+		Versions: []quic.Version{quic.Version2, quic.Version1},
 		// The handshake gets as long as an erasing path needs.
 		//
 		// On the channel this targets the handshake itself takes about five
@@ -839,7 +844,7 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 
 func explainDataHandshakeError(remote, transport string, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q rejected Queqiao protocol 1 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
+		return fmt.Errorf("Queqiao protocol 1 ALPN negotiation with %q over %s failed; check for an incompatible endpoint or an intermediary rewriting the handshake: %w", remote, transport, err)
 	}
 	return err
 }

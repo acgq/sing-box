@@ -10,6 +10,7 @@ import (
 type Client = pep.Client
 type Server = pep.Server
 type ClientConfig = pep.ClientConfig
+type MemoryLimits = pep.MemoryLimits
 type ServerConfig = pep.ServerConfig
 type Principal = identity.Principal
 type ClientProfile = identity.ClientProfile

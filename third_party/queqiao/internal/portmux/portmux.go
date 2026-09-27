@@ -277,7 +277,7 @@ type ServerPortMux struct {
 	// incoming is the merged receive queue. It is sized large enough to absorb
 	// bursts across all sockets without a secondary blocking a primary read.
 	incoming  chan serverPacket
-	routes    sync.Map // string(client addr) → *net.UDPConn
+	routes    routeCache
 	done      chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -392,8 +392,8 @@ func (m *ServerPortMux) readSocket(conn net.PacketConn) {
 // pickConn returns the socket most recently used by addr, falling back to the
 // primary socket if no mapping exists.
 func (m *ServerPortMux) pickConn(addr *net.UDPAddr) net.PacketConn {
-	if v, ok := m.routes.Load(addr.String()); ok {
-		return v.(net.PacketConn)
+	if conn := m.routes.lookup(addr.AddrPort(), time.Now()); conn != nil {
+		return conn
 	}
 	return m.primary
 }
@@ -410,7 +410,9 @@ func (m *ServerPortMux) ReadFrom(b []byte) (int, net.Addr, error) {
 			return 0, nil, net.ErrClosed
 		}
 		n := copy(b, pkt.data)
-		m.routes.Store(pkt.src.String(), pkt.conn)
+		if pkt.src != nil {
+			m.routes.remember(pkt.src.AddrPort(), pkt.conn, time.Now())
+		}
 		return n, pkt.src, nil
 	case <-m.done:
 		return 0, nil, net.ErrClosed

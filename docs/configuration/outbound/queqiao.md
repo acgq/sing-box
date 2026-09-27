@@ -32,9 +32,18 @@ the pool. It conflicts with `hop_port_count`, which retains the older
 deterministic 2–100-port behavior. All configured UDP ports must be reachable.
 Hopping reacts to sustained packet loss and retains the configured sing-box
 dialer and DNS routing. In `auto` mode, an established data-bearing flow also
-hands off to TCP when a rescued QUIC lane stops making application progress.
+hands off to TCP when a rescued QUIC lane cannot acknowledge pending outbound data.
+Waiting for an application response alone does not trigger a handoff.
 `congestion` defaults to
 `erasure`; `max_sessions` limits application flows.
+
+`low_memory` defaults to enabled on Linux systems with at most 512 MiB of
+physical memory. Set it explicitly to `true` or `false` to override detection.
+It bounds shared retained send/receive payloads to 4/8 MiB, reduces per-flow
+queues and QUIC receive windows, and uses one bulk QUIC connection. The default
+session limit in this mode is 128; an explicit `max_sessions` still takes precedence.
+These are protocol buffer limits, not a limit on whole-process RSS. Smaller
+windows may reduce throughput on high-bandwidth, high-latency connections.
 
 Inline mode needs no other runtime file. Certificates in the configuration
 must be replaced before expiry; automatic renewal cannot persist an inline
