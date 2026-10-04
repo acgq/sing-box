@@ -108,7 +108,9 @@ func (i *Inbound) metadata(ctx context.Context, destination string, principal Q.
 }
 func (i *Inbound) dialDestination(ctx context.Context, destination string, principal Q.Principal) (net.Conn, error) {
 	engine, routed := newStreamPipe()
-	i.router.RouteConnectionEx(ctx, routed, i.metadata(ctx, destination, principal), nil)
+	// Routing may read payload for sniffing. The engine must start forwarding
+	// before the router can read from the other end of this in-memory pipe.
+	go i.router.RouteConnectionEx(ctx, routed, i.metadata(ctx, destination, principal), func(error) { routed.Close() })
 	return engine, nil
 }
 func (i *Inbound) Start(stage adapter.StartStage) error {
@@ -244,7 +246,9 @@ func (i *Inbound) listenDestinationPacket(ctx context.Context, principal Q.Princ
 						}
 					}
 				}(key, local)
-				i.router.RoutePacketConnectionEx(relayCtx, bufio.NewPacketConn(routed), i.metadata(ctx, key, principal), func(error) { routed.Close() })
+				// Sniffing and DNS interception can read the first packet during
+				// routing. Let the bridge enqueue it while routing is in progress.
+				go i.router.RoutePacketConnectionEx(relayCtx, bufio.NewPacketConn(routed), i.metadata(ctx, key, principal), func(error) { routed.Close() })
 			}
 			mu.Unlock()
 			flow.SetWriteDeadline(time.Now().Add(5 * time.Second))

@@ -231,10 +231,13 @@ type Client struct {
 	// dead shared connection causes one handshake rather than one handshake per
 	// affected flow. The dial has a client lifetime of its own and is not
 	// cancelled merely because the first flow waiting for it goes away.
-	quicMu         sync.Mutex
-	quicGeneration *controlQUICGeneration
-	quicDial       *controlQUICDial
-	quicEpoch      uint64
+	quicMu          sync.Mutex
+	quicGeneration  *controlQUICGeneration
+	quicDial        *controlQUICDial
+	quicEpoch       uint64
+	resumeMu        sync.Mutex
+	resumeState     suspendWatchState
+	readSuspendTime func() (time.Duration, error)
 	// transientUDPLogNS rate-limits an otherwise synchronized burst of local
 	// route errors while still counting every suppressed send in metrics.
 	transientUDPLogNS atomic.Int64
@@ -278,6 +281,8 @@ type Client struct {
 	// handshake.
 	bulkMu    sync.Mutex
 	bulkConns []*bulkConn
+	bulkEpoch uint64
+	bulkDials map[*byte]context.CancelFunc
 
 	// pendingOpens admits only bounded remote setup work. It is deliberately
 	// non-blocking: callers beyond the bound are rejected promptly, release
@@ -377,7 +382,9 @@ type bulkConn struct {
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
 	busy       bool
-	idleTimer  *time.Timer
+	idleTimer  *time.Timer // guarded by Client.bulkMu
+	idleEpoch  uint64      // guarded by Client.bulkMu
+	closeOnce  sync.Once
 }
 
 // controlQUICGeneration owns exactly one shared connection and the packet
@@ -417,17 +424,25 @@ type controlQUICDial struct {
 	superseded bool
 }
 
-func (b *bulkConn) close(reason string) {
+// The owning client's bulkMu must be held. An epoch also invalidates a
+// callback that has already started and can no longer be stopped.
+func (b *bulkConn) stopIdleLocked() {
+	b.idleEpoch++
 	if b.idleTimer != nil {
 		b.idleTimer.Stop()
 		b.idleTimer = nil
 	}
-	if b.conn != nil {
-		_ = b.conn.CloseWithError(0, reason)
-	}
-	if b.packet != nil {
-		_ = b.packet.Close()
-	}
+}
+
+func (b *bulkConn) close(reason string) {
+	b.closeOnce.Do(func() {
+		if b.conn != nil {
+			_ = b.conn.CloseWithError(0, reason)
+		}
+		if b.packet != nil {
+			_ = b.packet.Close()
+		}
+	})
 }
 
 const bulkPoolIdleTimeout = 30 * time.Second
@@ -578,13 +593,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err := cfg.Profile.ValidateHints(); err != nil {
 		return nil, fmt.Errorf("client profile: %w", err)
 	}
-	return &Client{
+	client := &Client{
 		flowMeta: flowmeta.New(cfg.FlowMetadataSocket, cfg.FlowMetadataTimeout),
 		cfg:      cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		credentials: cfg.Credentials, budget: budget,
 		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
-	}, nil
+	}
+	client.checkSystemResume()
+	return client, nil
 }
 
 func (c *Client) MemoryStats() MemoryStats {
@@ -786,7 +803,15 @@ func (c *Client) closeControlQUICPool(reason string) {
 func (c *Client) closeBulkQUICPool(reason string) {
 	c.bulkMu.Lock()
 	bulkConns := c.bulkConns
+	for _, entry := range bulkConns {
+		entry.stopIdleLocked()
+	}
 	c.bulkConns = nil
+	c.bulkEpoch++
+	for _, cancel := range c.bulkDials {
+		cancel()
+	}
+	c.bulkDials = nil
 	c.bulkMu.Unlock()
 	for _, entry := range bulkConns {
 		entry.close(reason)
@@ -1488,6 +1513,7 @@ func (c *Client) acquireControlQUICGeneration(ctx context.Context, ccfg congesti
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		c.checkSystemResume()
 		c.quicMu.Lock()
 		if generation := c.quicGeneration; generation != nil && generation.conn.Context().Err() == nil {
 			c.quicMu.Unlock()
@@ -1519,11 +1545,9 @@ func (c *Client) acquireControlQUICGeneration(ctx context.Context, ccfg congesti
 		if attempt.err != nil {
 			return nil, attempt.err
 		}
-		if attempt.generation != nil {
-			return attempt.generation, nil
-		}
 		// A path reset can supersede an in-flight dial. Its waiters retry against
 		// the new epoch instead of inheriting a connection bound to the old path.
+		// Recheck suspend time too: the waiter may have slept while dialing.
 	}
 }
 
@@ -1748,10 +1772,15 @@ func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 // reserveBulkConn returns an idle authenticated connection, or establishes a
 // new one when every existing connection is already carrying a lane.
 func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.checkSystemResume()
 	c.bulkMu.Lock()
 	live := c.bulkConns[:0]
 	for _, entry := range c.bulkConns {
 		if entry.conn.Context().Err() != nil && !entry.busy {
+			entry.stopIdleLocked()
 			entry.close("queqiao stale bulk pool")
 			continue
 		}
@@ -1761,31 +1790,44 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	for _, entry := range c.bulkConns {
 		if !entry.busy && entry.conn.Context().Err() == nil {
 			entry.busy = true
-			if entry.idleTimer != nil {
-				entry.idleTimer.Stop()
-				entry.idleTimer = nil
-			}
+			entry.stopIdleLocked()
 			c.bulkMu.Unlock()
 			return entry, nil
 		}
 	}
-	if len(c.bulkConns) >= c.maxBulkConns() {
+	if len(c.bulkConns)+len(c.bulkDials) >= c.maxBulkConns() {
 		c.bulkMu.Unlock()
 		return nil, errBulkConnectionLimit
 	}
+	epoch := c.bulkEpoch
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if c.bulkDials == nil {
+		c.bulkDials = make(map[*byte]context.CancelFunc)
+	}
+	token := new(byte)
+	c.bulkDials[token] = cancel
 	c.bulkMu.Unlock()
 
 	// The handshake is deliberately performed without the pool mutex so that
 	// one slow secondary handshake cannot block every other lane join.
-	entry, err := c.dialBulkConn(ctx)
-	if err != nil {
-		return nil, err
-	}
+	entry, err := c.dialBulkConn(dialCtx)
+	// A handshake can span sleep or a host interface reset. Do not publish
+	// the old connection into the new pool, even if its handshake succeeded.
+	c.checkSystemResume()
 	c.bulkMu.Lock()
-	if len(c.bulkConns) >= c.maxBulkConns() {
+	if epoch == c.bulkEpoch {
+		delete(c.bulkDials, token)
+	}
+	if err != nil || epoch != c.bulkEpoch || dialCtx.Err() != nil {
 		c.bulkMu.Unlock()
-		entry.close("queqiao bulk pool limit reached")
-		return nil, errBulkConnectionLimit
+		if entry != nil {
+			entry.close("queqiao obsolete bulk dial")
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
 	}
 	entry.busy = true
 	c.bulkConns = append(c.bulkConns, entry)
@@ -1892,7 +1934,20 @@ func (s *bulkPoolStreamConn) Close() error {
 // following flow can skip the handshake, then closed.
 func (c *Client) releaseBulkConn(entry *bulkConn, dead bool) {
 	c.bulkMu.Lock()
+	found := false
+	for _, existing := range c.bulkConns {
+		if existing == entry {
+			found = true
+			break
+		}
+	}
+	entry.stopIdleLocked()
 	entry.busy = false
+	if !found {
+		c.bulkMu.Unlock()
+		entry.close("queqiao detached bulk pool release")
+		return
+	}
 	if dead {
 		remaining := c.bulkConns[:0]
 		for _, existing := range c.bulkConns {
@@ -1905,16 +1960,14 @@ func (c *Client) releaseBulkConn(entry *bulkConn, dead bool) {
 		entry.close("queqiao bulk pool failed")
 		return
 	}
-	if entry.idleTimer != nil {
-		entry.idleTimer.Stop()
-	}
-	entry.idleTimer = time.AfterFunc(bulkPoolIdleTimeout, func() { c.expireBulkConn(entry) })
+	epoch := entry.idleEpoch
+	entry.idleTimer = time.AfterFunc(bulkPoolIdleTimeout, func() { c.expireBulkConn(entry, epoch) })
 	c.bulkMu.Unlock()
 }
 
-func (c *Client) expireBulkConn(entry *bulkConn) {
+func (c *Client) expireBulkConn(entry *bulkConn, epoch uint64) {
 	c.bulkMu.Lock()
-	if entry.busy {
+	if entry.busy || entry.idleEpoch != epoch {
 		c.bulkMu.Unlock()
 		return
 	}
@@ -1923,6 +1976,7 @@ func (c *Client) expireBulkConn(entry *bulkConn) {
 	for _, existing := range c.bulkConns {
 		if existing == entry {
 			found = true
+			entry.stopIdleLocked()
 			continue
 		}
 		remaining = append(remaining, existing)
@@ -1978,7 +2032,9 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	}()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	joins := make(chan laneJoinResult, 1)
+	// The dialer owns the lane until this manager receives it. If the
+	// manager exits, cancellation closes the undelivered transport.
+	joins := make(chan laneJoinResult)
 	joinPending := false
 	isolated := false
 	var lastDecision time.Time
@@ -2029,9 +2085,12 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 					return
 				}
 				if errors.Is(err, errLaneJoinRejected) {
-					// As below: the peer's answer is permanent, so stop.
+					// The suspect lane still counts as healthy locally, so no
+					// replacement waiter will observe this flag. Close the flow
+					// to release the application on this terminal peer answer.
 					flow.resumeRefused.Store(true)
 					c.cfg.Logger.Debug("peer cannot resume this association", "flow_id", flowID, "error", err)
+					flow.closeAll()
 					return
 				}
 				if errors.Is(err, errLaneJoinCapacity) && flow.laneCapacityRefusals() >= maxLaneRecoveryAttempts {
@@ -2043,6 +2102,7 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 					// reconnects on a fresh flow.
 					flow.resumeRefused.Store(true)
 					c.cfg.Logger.Debug("peer lane capacity answer persisted; giving up on this association", "flow_id", flowID, "refusals", flow.laneCapacityRefusals())
+					flow.closeAll()
 					return
 				}
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -2315,7 +2375,7 @@ func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessi
 
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
-	joins := make(chan laneJoinResult, maxTCPFallbackLanes)
+	joins := make(chan laneJoinResult)
 	pending := 0
 	bundleFailures := 0
 	recoveryAttempts := 0
@@ -2546,17 +2606,13 @@ type rescueAttempt func(ctx context.Context) (*mpLane, error)
 // flip repeated slowly, while several independent handshakes fail together
 // only when the path truly carries nothing.
 //
-// Attempt zero is the established recovery strategy unchanged -- for a pooled
-// flow that is the shared control generation (whose dial stays singleflight:
-// every affected flow coalesces onto it, and the racers below never touch
-// that generation's state), and for AUTO it keeps the bounded QUIC window
-// followed by exactly one committed TCP JOIN. The remaining attempts are
-// independent dedicated QUIC dials. Each one draws the next walked hop port,
-// so with port hopping configured they spray across the pool; without it they
-// dial the same single port, where the value is independent handshakes with
-// independent retransmission schedules rather than port diversity. The TCP
-// fallback's conditions are untouched: a TCP commit can still only come from
-// attempt zero, on the same terms openRecoveryLane always had.
+// Parallel JOINs are safe only in QUIC-only mode. AUTO uses the established
+// sequential strategy: shared QUIC recovery first when available, then TCP.
+// A TCP JOIN retires the server's QUIC lanes before its acknowledgement reaches
+// the client. Racing that commit against a QUIC JOIN can therefore destroy
+// the apparent QUIC winner, even if the losing TCP attempt is cancelled.
+// QUIC-only racers remain independent dedicated dials over the hop walk.
+//
 // runRescueRound executes one parallel rescue round under the flow's
 // in-flight guard: the stall watchdog stays silent for the round, and any
 // request it managed to queue just before the guard engaged is dropped
@@ -2593,7 +2649,7 @@ func (c *Client) openParallelRescue(ctx context.Context, flow *multipathFlow, se
 	attempts = append(attempts, func(ctx context.Context) (*mpLane, error) {
 		return c.openRecoveryLane(ctx, flow, sessionID, flowID)
 	})
-	if c.cfg.Transport != TransportTCP {
+	if c.cfg.Transport == TransportQUIC {
 		for len(attempts) < metrics.RescueAttemptSlots {
 			attempts = append(attempts, func(ctx context.Context) (*mpLane, error) {
 				return c.openSprayedQUICRescueJoin(ctx, flow, sessionID, flowID)
@@ -2799,10 +2855,8 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 			// peer which genuinely lost the session rejects this one as well.
 			lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)
 		} else {
-			// The fallback is counted where the TCP lane is installed, not
-			// here: in a parallel rescue round this commit races sprayed
-			// QUIC dials, and when one of those wins the flow never touches
-			// TCP at all.
+			// The fallback is counted when the acknowledged TCP lane is
+			// installed. No competing QUIC JOIN may race this handoff.
 			c.cfg.Logger.Debug("shared QUIC generation recovery unavailable; committing flow to TCP",
 				"flow", flowID, "error", err)
 			lane, err = c.openJoinLane(recoveryCtx, TransportTCP, sessionID, flowID, laneID)
@@ -2831,8 +2885,8 @@ func (c *Client) installRecoveryLane(flow *multipathFlow, lane *mpLane) error {
 		return err
 	}
 	if lane.kind == TransportTCP {
-		// The handoff is real only now: the lane won its rescue round and
-		// will actually carry the flow.
+		// The server committed the handoff at JOIN admission. Count it
+		// locally only after its acknowledged lane is installed.
 		c.metrics.Fallback()
 		if c.cfg.TCPFallbackLanes > 1 {
 			flow.tcpStriping.Store(lane.tcpStriping)
@@ -2843,6 +2897,9 @@ func (c *Client) installRecoveryLane(flow *multipathFlow, lane *mpLane) error {
 }
 
 func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLane, error) {
+	// Embedded clients use host interface notifications rather than watchUplink.
+	// Check sleep before consulting the old path's UDP cooldown as well.
+	c.checkSystemResume()
 	switch c.cfg.Transport {
 	case TransportTCP:
 		return c.dialAuthenticatedCandidate(ctx, TransportTCP)

@@ -1,0 +1,2 @@
+# Frozen wire vectors are compared byte-for-byte with Go's JSON encoding.
+testdata/protocol1/vectors.json text eol=lf
