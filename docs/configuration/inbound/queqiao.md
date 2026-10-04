@@ -72,6 +72,10 @@ reactive hopping rather than a fixed timer.
 `congestion` defaults to `erasure`. Authenticated TCP and UDP flows are sent
 through sing-box routing, with the account ID as `auth_user`.
 
+Accepted outer TCP connections default to `tcp_keep_alive: "30s"` and
+`tcp_keep_alive_interval: "15s"` to preserve idle network paths. Override
+these listen fields or set `disable_tcp_keep_alive` to disable keepalive.
+
 Inline mode needs no other runtime file. It does not run Queqiao enrollment or
 certificate renewal: provision devices separately and replace expiring
 certificates in the sing-box configuration before expiry. For existing

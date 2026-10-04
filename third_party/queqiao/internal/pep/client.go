@@ -1945,6 +1945,11 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	if initialKind == TransportTCP {
 		if c.cfg.TCPFallbackLanes > 1 {
 			c.manageTCPBundle(ctx, flow, sessionID, flowID)
+		} else {
+			// Single-lane TCP has no replacement manager. Once the socket
+			// fails, let the application reconnect without spending a grace
+			// period waiting for a lane nobody will open.
+			flow.noteReplacementAbandoned()
 		}
 		return
 	}

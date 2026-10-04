@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	Q "github.com/sagernet/sing-box/third_party/queqiao"
 	"github.com/sagernet/sing/common/bufio"
+	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/service/filemanager"
 )
@@ -79,6 +80,16 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		tcp = false
 	default:
 		return nil, errors.New("invalid queqiao transport")
+	}
+	// ServeListener bypasses Queqiao's native listener keepalive settings.
+	// Use the same idle-path protection as the outbound unless overridden.
+	if !options.DisableTCPKeepAlive {
+		if options.TCPKeepAlive == 0 {
+			options.TCPKeepAlive = badoption.Duration(30 * time.Second)
+		}
+		if options.TCPKeepAliveInterval == 0 {
+			options.TCPKeepAliveInterval = badoption.Duration(15 * time.Second)
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	i := &Inbound{Adapter: inbound.NewAdapter(Type, tag), ctx: runCtx, cancel: cancel, router: router, logger: logger, tcp: tcp, udp: udp, listenOptions: options.ListenOptions}

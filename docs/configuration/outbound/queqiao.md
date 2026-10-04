@@ -37,6 +37,12 @@ Waiting for an application response alone does not trigger a handoff.
 `congestion` defaults to
 `erasure`; `max_sessions` limits application flows.
 
+Outer TCP connections default to `tcp_keep_alive: "30s"` and
+`tcp_keep_alive_interval: "15s"` to preserve idle network paths, including
+TCP fallback in `auto` mode. Override these dial fields or set
+`disable_tcp_keep_alive` to disable keepalive. With `detour`, the referenced
+outbound controls keepalive on the underlying connection.
+
 `low_memory` defaults to enabled on Linux systems with at most 512 MiB of
 physical memory. Set it explicitly to `true` or `false` to override detection.
 It bounds shared retained send/receive payloads to 4/8 MiB, reduces per-flow

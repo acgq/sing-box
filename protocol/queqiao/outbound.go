@@ -17,6 +17,7 @@ import (
 	Q "github.com/sagernet/sing-box/third_party/queqiao"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
+	"github.com/sagernet/sing/common/json/badoption"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
@@ -105,6 +106,16 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	transport := options.Transport
 	if transport == "" {
 		transport = "auto"
+	}
+	// OuterDialer bypasses Queqiao's native TCP keepalive settings. Keep idle
+	// tunnels alive through NATs while preserving explicit dialer options.
+	if !options.DisableTCPKeepAlive && !options.TCPKeepAliveSystemDefaults {
+		if options.TCPKeepAlive == 0 {
+			options.TCPKeepAlive = badoption.Duration(30 * time.Second)
+		}
+		if options.TCPKeepAliveInterval == 0 {
+			options.TCPKeepAliveInterval = badoption.Duration(15 * time.Second)
+		}
 	}
 	d, err := dialer.NewWithOptions(dialer.Options{Context: ctx, Options: options.DialerOptions, RemoteIsDomain: destination.IsDomain()})
 	if err != nil {

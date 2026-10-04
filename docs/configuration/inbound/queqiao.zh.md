@@ -61,6 +61,10 @@ TCP 回退仍使用主端口。`hop_ports` 与 `hop_port_count` 互斥；后者�
 `erasure`。已认证的 TCP/UDP 流量交由 sing-box 路由，账号 ID 作为
 `auth_user`。
 
+接入的外层 TCP 连接默认使用 `tcp_keep_alive: "30s"` 和
+`tcp_keep_alive_interval: "15s"`，用于维持空闲网络路径。可通过同名监听字段
+覆盖，或用 `disable_tcp_keep_alive` 禁用。
+
 内联模式运行时无需其他文件，但不执行设备注册和证书自动续期；请在证书
 到期前更新配置。现有配置仍可改用 `provider_path`，保留授权文件热加载和
 网关证书自动续期；它不能与内联身份字段同时使用。

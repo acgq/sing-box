@@ -32,6 +32,11 @@
 还会将该流量交接至 TCP。`congestion` 默认为 `erasure`，`max_sessions`
 限制应用会话数。
 
+外层 TCP 连接默认使用 `tcp_keep_alive: "30s"` 和
+`tcp_keep_alive_interval: "15s"`，用于维持空闲网络路径，也适用于 `auto`
+模式的 TCP 回退。可通过同名拨号字段覆盖，或用 `disable_tcp_keep_alive`
+禁用。使用 `detour` 时，底层连接的保活由被引用的出站控制。
+
 仅等待应用响应不会触发 TCP 交接。`low_memory` 在物理内存不超过 512 MiB
 的 Linux 系统上默认启用，可显式设置 `true` 或 `false` 覆盖自动检测。
 启用后，所有流共享的发送和接收载荷预算分别为 4 MiB 和 8 MiB，同时缩小
